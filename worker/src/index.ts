@@ -2,7 +2,10 @@ import { DEFAULT_UNLOCK_THRESHOLDS, MODELS } from './config/models'
 import { HARDCODED_EXERCISES } from './lib/hardcodedExercises'
 import { createChatCompletion } from './lib/openrouter'
 import { calculateAttemptScore } from './lib/scoring'
+import { GENERATOR_SYSTEM_PROMPT } from './prompts/generator'
 import { EXAMINER_SYSTEM_PROMPT } from './prompts/examiner'
+import { HELPER_SYSTEM_PROMPT } from './prompts/helper'
+import { RECALL_SYSTEM_PROMPT } from './prompts/recall'
 
 type DifficultyBand = 'basic' | 'intermediate' | 'advanced'
 
@@ -41,13 +44,46 @@ type SettingsRow = {
   unlock_thresholds_json: string
 }
 
-type ExerciseAttemptCountRow = {
-  exercise_id: string
-  attempt_count: number
-}
-
 type ScoreRow = {
   per_attempt_score: number
+}
+
+type StoredExerciseRow = {
+  id: string
+  prompt_md: string
+  starter_code: string | null
+  reference_solution: string
+  tests: string
+  difficulty_band: DifficultyBand
+}
+
+type ExerciseTopicLinkRow = {
+  id: string
+  display_name: string
+}
+
+type ExerciseTopicSummary = {
+  id: string
+  displayName: string
+}
+
+type ExerciseRecord = {
+  id: string
+  promptMd: string
+  starterCode: string | null
+  referenceSolution: string
+  tests: string
+  difficultyBand: DifficultyBand
+  topics: ExerciseTopicSummary[]
+}
+
+type EffectiveSettings = {
+  costCapDailyUsd: number | null
+  costCapMonthlyUsd: number | null
+  modelOverrides: Record<string, string>
+  models: Record<string, string>
+  preferredTopics: string[]
+  unlockThresholds: Record<string, number>
 }
 
 type ExerciseSubmissionRequest = {
@@ -66,18 +102,44 @@ type ExerciseSubmissionRequest = {
   }>
 }
 
-type EffectiveSettings = {
-  costCapDailyUsd: number | null
-  costCapMonthlyUsd: number | null
-  modelOverrides: Record<string, string>
-  models: Record<string, string>
-  preferredTopics: string[]
-  unlockThresholds: Record<string, number>
+type ChatMessage = {
+  role: 'user' | 'assistant'
+  content: string
 }
 
-const HARDCODED_EXERCISE_MAP = new Map(
-  HARDCODED_EXERCISES.map((exercise) => [exercise.id, exercise]),
-)
+type ChatRequest = {
+  exerciseId?: string
+  code: string
+  history: ChatMessage[]
+  message: string
+}
+
+type RecallRequest = {
+  code: string
+  hint: string
+  lineContext?: string
+}
+
+type GeneratedExerciseCandidate = {
+  id: string
+  promptMd: string
+  starterCode: string | null
+  referenceSolution: string
+  tests: string
+  difficultyBand: DifficultyBand
+  topics: ExerciseTopicSummary[]
+}
+
+type NextExerciseRequest =
+  | {
+      verification?: undefined
+    }
+  | {
+      verification: {
+        candidate: GeneratedExerciseCandidate
+        passed: boolean
+      }
+    }
 
 const CORS_HEADERS = {
   'access-control-allow-origin': '*',
@@ -147,6 +209,40 @@ function getCurrentDifficultyBand(
 function withAuth(request: Request, env: Env) {
   const token = request.headers.get('x-app-token')
   return token !== null && token === env.API_SHARED_TOKEN
+}
+
+async function hashExercise(candidate: {
+  promptMd: string
+  starterCode: string | null
+  referenceSolution: string
+  tests: string
+}) {
+  const text = JSON.stringify(candidate)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+function stripCodeFences(value: string) {
+  const trimmed = value.trim()
+
+  if (!trimmed.startsWith('```')) {
+    return trimmed
+  }
+
+  return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+}
+
+function toPublicExercise(exercise: ExerciseRecord) {
+  return {
+    id: exercise.id,
+    promptMd: exercise.promptMd,
+    starterCode: exercise.starterCode,
+    tests: exercise.tests,
+    difficultyBand: exercise.difficultyBand,
+    topics: exercise.topics,
+  }
 }
 
 async function ensureHardcodedExercises(env: Env) {
@@ -226,6 +322,43 @@ async function getEffectiveSettings(env: Env): Promise<EffectiveSettings> {
   }
 }
 
+async function getExerciseRecord(env: Env, exerciseId: string) {
+  const row = await env.DB.prepare(
+    `
+      SELECT id, prompt_md, starter_code, reference_solution, tests, difficulty_band
+      FROM exercises
+      WHERE id = ?
+    `,
+  ).bind(exerciseId).first<StoredExerciseRow>()
+
+  if (!row) {
+    return null
+  }
+
+  const topicResults = await env.DB.prepare(
+    `
+      SELECT topics.id, topics.display_name
+      FROM exercise_topics
+      INNER JOIN topics ON topics.id = exercise_topics.topic_id
+      WHERE exercise_topics.exercise_id = ?
+      ORDER BY topics.display_name
+    `,
+  ).bind(exerciseId).all<ExerciseTopicLinkRow>()
+
+  return {
+    id: row.id,
+    promptMd: row.prompt_md,
+    starterCode: row.starter_code,
+    referenceSolution: row.reference_solution,
+    tests: row.tests,
+    difficultyBand: row.difficulty_band,
+    topics: (topicResults.results ?? []).map((topic) => ({
+      id: topic.id,
+      displayName: topic.display_name,
+    })),
+  } satisfies ExerciseRecord
+}
+
 async function getStatePayload(env: Env) {
   const effectiveSettings = await getEffectiveSettings(env)
 
@@ -297,51 +430,261 @@ async function handleState(env: Env) {
   return json(await getStatePayload(env))
 }
 
-async function handleNextExercise(env: Env) {
+async function chooseTargetTopic(env: Env, settings: EffectiveSettings, difficultyBand: DifficultyBand) {
+  const topicResults = await env.DB.prepare(
+    `
+      SELECT
+        topics.id AS topic_id,
+        topics.display_name,
+        topics.difficulty_band,
+        competence.score,
+        competence.attempt_count,
+        competence.last_updated
+      FROM topics
+      LEFT JOIN competence ON competence.topic_id = topics.id
+      WHERE topics.difficulty_band = ?
+      ORDER BY COALESCE(competence.score, 0) ASC, COALESCE(competence.attempt_count, 0) ASC
+    `,
+  ).bind(difficultyBand).all<TopicRow>()
+
+  const recentTopicResults = await env.DB.prepare(
+    `
+      SELECT exercise_topics.topic_id
+      FROM attempts
+      INNER JOIN exercise_topics ON exercise_topics.exercise_id = attempts.exercise_id
+      ORDER BY attempts.created_at DESC
+      LIMIT 4
+    `,
+  ).all<{ topic_id: string }>()
+
+  const recentTopicIds = new Set((recentTopicResults.results ?? []).map((row) => row.topic_id))
+  const allowed = (topicResults.results ?? []).filter((topic) => {
+    return (
+      (!settings.preferredTopics.length || settings.preferredTopics.includes(topic.topic_id)) &&
+      !recentTopicIds.has(topic.topic_id)
+    )
+  })
+
+  const fallback = (topicResults.results ?? []).filter((topic) => {
+    return !settings.preferredTopics.length || settings.preferredTopics.includes(topic.topic_id)
+  })
+
+  const topic = allowed[0] ?? fallback[0] ?? topicResults.results?.[0]
+
+  if (!topic) {
+    return null
+  }
+
+  return {
+    id: topic.topic_id,
+    displayName: topic.display_name,
+    difficultyBand: topic.difficulty_band,
+  }
+}
+
+async function getCachedExercise(
+  env: Env,
+  topicId: string,
+  difficultyBand: DifficultyBand,
+) {
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  const row = await env.DB.prepare(
+    `
+      SELECT exercises.id
+      FROM exercises
+      INNER JOIN exercise_topics ON exercise_topics.exercise_id = exercises.id
+      WHERE exercise_topics.topic_id = ?
+        AND exercises.difficulty_band = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM attempts
+          WHERE attempts.exercise_id = exercises.id
+            AND attempts.created_at >= ?
+        )
+      ORDER BY RANDOM()
+      LIMIT 1
+    `,
+  ).bind(topicId, difficultyBand, cutoff).first<{ id: string }>()
+
+  if (!row) {
+    return null
+  }
+
+  return getExerciseRecord(env, row.id)
+}
+
+function buildGeneratorUserMessage(topic: ExerciseTopicSummary, difficultyBand: DifficultyBand) {
+  return [
+    `Target topic: ${topic.displayName} (${topic.id})`,
+    `Target difficulty band: ${difficultyBand}`,
+    '',
+    'Constraints:',
+    '- Stdlib only',
+    '- No network I/O',
+    '- No subprocess usage',
+    '- No real OS file access',
+    '- Keep the exercise self-contained and short',
+    '- Tests must import from solution',
+    '- Tests must use plain Python test_ functions and assert statements',
+    '',
+    'Return JSON only.',
+  ].join('\n')
+}
+
+async function generateExerciseCandidate(
+  env: Env,
+  settings: EffectiveSettings,
+  topic: ExerciseTopicSummary,
+  difficultyBand: DifficultyBand,
+) {
+  if (!env.OPENROUTER_API_KEY) {
+    return null
+  }
+
+  const content = await createChatCompletion({
+    apiKey: env.OPENROUTER_API_KEY,
+    model: settings.models.generator ?? MODELS.generator,
+    baseUrl: env.OPENROUTER_BASE_URL,
+    referer: env.OPENROUTER_HTTP_REFERER,
+    title: env.OPENROUTER_APP_TITLE ?? 'Python Learning App',
+    temperature: 0.5,
+    maxTokens: 900,
+    messages: [
+      { role: 'system', content: GENERATOR_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: buildGeneratorUserMessage(topic, difficultyBand),
+      },
+    ],
+  })
+
+  const payload = JSON.parse(stripCodeFences(content)) as {
+    prompt_md: string
+    starter_code: string
+    reference_solution: string
+    tests: string
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    promptMd: payload.prompt_md,
+    starterCode: payload.starter_code ?? '',
+    referenceSolution: payload.reference_solution,
+    tests: payload.tests,
+    difficultyBand,
+    topics: [topic],
+  } satisfies GeneratedExerciseCandidate
+}
+
+async function persistVerifiedExercise(env: Env, candidate: GeneratedExerciseCandidate) {
+  const hash = await hashExercise(candidate)
+  const existing = await env.DB.prepare(
+    `SELECT id FROM exercises WHERE hash = ?`,
+  ).bind(hash).first<{ id: string }>()
+
+  if (existing?.id) {
+    const record = await getExerciseRecord(env, existing.id)
+    if (!record) {
+      throw new Error('Failed to load existing verified exercise.')
+    }
+
+    return record
+  }
+
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `
+        INSERT INTO exercises (
+          id,
+          prompt_md,
+          starter_code,
+          reference_solution,
+          tests,
+          difficulty_band,
+          hash,
+          created_at,
+          parent_exercise_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      `,
+    ).bind(
+      candidate.id,
+      candidate.promptMd,
+      candidate.starterCode,
+      candidate.referenceSolution,
+      candidate.tests,
+      candidate.difficultyBand,
+      hash,
+      Date.now(),
+    ),
+  ]
+
+  for (const topic of candidate.topics) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO exercise_topics (exercise_id, topic_id) VALUES (?, ?)`,
+      ).bind(candidate.id, topic.id),
+    )
+  }
+
+  await env.DB.batch(statements)
+
+  const record = await getExerciseRecord(env, candidate.id)
+  if (!record) {
+    throw new Error('Failed to load verified exercise after insert.')
+  }
+
+  return record
+}
+
+async function handleNextExercise(request: Request, env: Env) {
   await ensureHardcodedExercises(env)
 
-  const recentAttemptResults = await env.DB.prepare(
-    `
-      SELECT exercise_id
-      FROM attempts
-      ORDER BY created_at DESC
-      LIMIT 2
-    `,
-  ).all<{ exercise_id: string }>()
+  const payload = (await request.json().catch(() => ({}))) as NextExerciseRequest
 
-  const attemptCountResults = await env.DB.prepare(
-    `
-      SELECT exercise_id, COUNT(*) AS attempt_count
-      FROM attempts
-      GROUP BY exercise_id
-    `,
-  ).all<ExerciseAttemptCountRow>()
+  if (payload.verification) {
+    if (!payload.verification.passed) {
+      return json({ error: 'Generated exercise failed browser verification.' }, 400)
+    }
 
-  const recentExerciseIds = new Set(
-    (recentAttemptResults.results ?? []).map((row) => row.exercise_id),
-  )
-  const attemptCounts = new Map(
-    (attemptCountResults.results ?? []).map((row) => [row.exercise_id, row.attempt_count]),
-  )
+    const exercise = await persistVerifiedExercise(env, payload.verification.candidate)
+    return json({ mode: 'ready', exercise: toPublicExercise(exercise) })
+  }
 
-  const sortedExercises = [...HARDCODED_EXERCISES].sort((left, right) => {
-    return (attemptCounts.get(left.id) ?? 0) - (attemptCounts.get(right.id) ?? 0)
-  })
+  const settings = await getEffectiveSettings(env)
+  const state = await getStatePayload(env)
+  const difficultyBand = state.currentDifficultyBand
+  const topic = await chooseTargetTopic(env, settings, difficultyBand)
 
-  const exercise =
-    sortedExercises.find((candidate) => !recentExerciseIds.has(candidate.id)) ??
-    sortedExercises[0]
+  if (!topic) {
+    return json({ error: 'No topic is available for the next exercise.' }, 500)
+  }
 
-  return json({
-    exercise: {
-      id: exercise.id,
-      promptMd: exercise.promptMd,
-      starterCode: exercise.starterCode,
-      tests: exercise.tests,
-      difficultyBand: exercise.difficultyBand,
-      topics: exercise.topics,
-    },
-  })
+  const shouldServeCache = Math.random() < 0.7 || !env.OPENROUTER_API_KEY
+  const cachedExercise = await getCachedExercise(env, topic.id, difficultyBand)
+
+  if (cachedExercise && shouldServeCache) {
+    return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
+  }
+
+  if (env.OPENROUTER_API_KEY) {
+    try {
+      const candidate = await generateExerciseCandidate(env, settings, topic, difficultyBand)
+
+      if (candidate) {
+        return json({ mode: 'verify', candidate })
+      }
+    } catch {
+      if (cachedExercise) {
+        return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
+      }
+    }
+  }
+
+  if (cachedExercise) {
+    return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
+  }
+
+  return json({ error: 'Could not prepare a verified exercise. Try again.' }, 500)
 }
 
 async function recomputeCompetence(env: Env, topicIds: string[]) {
@@ -485,11 +828,189 @@ async function getExaminerReview(options: {
   }
 }
 
+function buildHelperUserMessage(options: {
+  promptMd: string
+  code: string
+  message: string
+}) {
+  return [
+    'Current exercise:',
+    options.promptMd,
+    '',
+    'Current code:',
+    '```python',
+    options.code,
+    '```',
+    '',
+    'User message:',
+    options.message,
+  ].join('\n')
+}
+
+function buildRecallUserMessage(options: RecallRequest) {
+  return [
+    `Hint: ${options.hint}`,
+    '',
+    'Current line or context:',
+    options.lineContext || '(not provided)',
+    '',
+    'Current code:',
+    '```python',
+    options.code,
+    '```',
+  ].join('\n')
+}
+
+function buildFallbackRecallMessage(hint: string) {
+  const normalized = hint.toLowerCase()
+
+  if (/(count|increment|dictionary|dict)/.test(normalized)) {
+    return [
+      '```python',
+      'counts[word] = counts.get(word, 0) + 1',
+      '```',
+      'Use this when you want to increment a dictionary counter in one line.',
+      '',
+      '```python',
+      'if word in counts:',
+      '    counts[word] += 1',
+      'else:',
+      '    counts[word] = 1',
+      '```',
+      'Use this when you want the explicit branch form.',
+    ].join('\n')
+  }
+
+  if (/(append|list|add item)/.test(normalized)) {
+    return [
+      '```python',
+      'result.append(value)',
+      '```',
+      'Use this to add one item to the end of a list.',
+      '',
+      '```python',
+      'result.extend(values)',
+      '```',
+      'Use this when you already have an iterable of multiple items.',
+    ].join('\n')
+  }
+
+  if (/(loop|index|enumerate)/.test(normalized)) {
+    return [
+      '```python',
+      'for item in items:',
+      '    ...',
+      '```',
+      'Use this for a plain loop over values.',
+      '',
+      '```python',
+      'for index, item in enumerate(items):',
+      '    ...',
+      '```',
+      'Use this when you need both the index and the value.',
+    ].join('\n')
+  }
+
+  if (/(read|file|lines)/.test(normalized)) {
+    return [
+      '```python',
+      'with open(path) as file:',
+      '    text = file.read()',
+      '```',
+      'Use this when you want the whole file as one string.',
+      '',
+      '```python',
+      'with open(path) as file:',
+      '    lines = file.readlines()',
+      '```',
+      'Use this when you want a list of lines.',
+    ].join('\n')
+  }
+
+  return [
+    '```python',
+    '# sketch the syntax you need here',
+    '```',
+    'Use this as a placeholder and adapt it to your current line.',
+  ].join('\n')
+}
+
+async function handleChat(request: Request, env: Env) {
+  const payload = (await request.json()) as ChatRequest
+
+  if (!env.OPENROUTER_API_KEY) {
+    return json({
+      message: 'Helper is unavailable until OPENROUTER_API_KEY is configured on the worker.',
+    })
+  }
+
+  const effectiveSettings = await getEffectiveSettings(env)
+  const exercise = payload.exerciseId ? await getExerciseRecord(env, payload.exerciseId) : null
+
+  if (!exercise) {
+    return json({ error: 'Unknown exercise id for helper chat.' }, 400)
+  }
+
+  const message = await createChatCompletion({
+    apiKey: env.OPENROUTER_API_KEY,
+    model: effectiveSettings.models.helper ?? MODELS.helper,
+    baseUrl: env.OPENROUTER_BASE_URL,
+    referer: env.OPENROUTER_HTTP_REFERER,
+    title: env.OPENROUTER_APP_TITLE ?? 'Python Learning App',
+    temperature: 0.4,
+    maxTokens: 260,
+    messages: [
+      { role: 'system', content: HELPER_SYSTEM_PROMPT },
+      ...payload.history.map((entry) => ({
+        role: entry.role,
+        content: entry.content,
+      })),
+      {
+        role: 'user',
+        content: buildHelperUserMessage({
+          promptMd: exercise.promptMd,
+          code: payload.code,
+          message: payload.message,
+        }),
+      },
+    ],
+  }).catch(() => 'Helper request failed. Try asking again in a moment.')
+
+  return json({ message })
+}
+
+async function handleRecall(request: Request, env: Env) {
+  const payload = (await request.json()) as RecallRequest
+
+  if (!env.OPENROUTER_API_KEY) {
+    return json({
+      message: buildFallbackRecallMessage(payload.hint),
+    })
+  }
+
+  const effectiveSettings = await getEffectiveSettings(env)
+  const message = await createChatCompletion({
+    apiKey: env.OPENROUTER_API_KEY,
+    model: effectiveSettings.models.recall ?? MODELS.recall,
+    baseUrl: env.OPENROUTER_BASE_URL,
+    referer: env.OPENROUTER_HTTP_REFERER,
+    title: env.OPENROUTER_APP_TITLE ?? 'Python Learning App',
+    temperature: 0.3,
+    maxTokens: 240,
+    messages: [
+      { role: 'system', content: RECALL_SYSTEM_PROMPT },
+      { role: 'user', content: buildRecallUserMessage(payload) },
+    ],
+  }).catch(() => buildFallbackRecallMessage(payload.hint))
+
+  return json({ message })
+}
+
 async function handleSubmit(request: Request, env: Env) {
   await ensureHardcodedExercises(env)
 
   const payload = (await request.json()) as ExerciseSubmissionRequest
-  const exercise = HARDCODED_EXERCISE_MAP.get(payload.exerciseId)
+  const exercise = await getExerciseRecord(env, payload.exerciseId)
   const effectiveSettings = await getEffectiveSettings(env)
 
   if (!exercise) {
@@ -588,17 +1109,22 @@ export default {
     }
 
     if (request.method === 'POST' && url.pathname === '/api/exercise/next') {
-      return handleNextExercise(env)
+      return handleNextExercise(request, env)
     }
 
     if (request.method === 'POST' && url.pathname === '/api/exercise/submit') {
       return handleSubmit(request, env)
     }
 
-    if (
-      ['POST', 'GET'].includes(request.method) &&
-      ['/api/chat', '/api/recall', '/api/settings'].includes(url.pathname)
-    ) {
+    if (request.method === 'POST' && url.pathname === '/api/chat') {
+      return handleChat(request, env)
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/recall') {
+      return handleRecall(request, env)
+    }
+
+    if (['POST', 'GET'].includes(request.method) && ['/api/settings'].includes(url.pathname)) {
       return notImplemented(url.pathname)
     }
 

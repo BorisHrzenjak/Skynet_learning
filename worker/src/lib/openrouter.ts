@@ -35,6 +35,8 @@ export async function createChatCompletion(options: {
   baseUrl?: string
   referer?: string
   title?: string
+  temperature?: number
+  maxTokens?: number
 }) {
   const response = await fetch(
     `${options.baseUrl ?? 'https://openrouter.ai/api/v1'}/chat/completions`,
@@ -49,8 +51,8 @@ export async function createChatCompletion(options: {
       body: JSON.stringify({
         model: options.model,
         messages: options.messages,
-        temperature: 0.2,
-        max_tokens: 220,
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.maxTokens ?? 220,
       }),
     },
   )

@@ -14,6 +14,20 @@ export type Exercise = {
   topics: ExerciseTopic[]
 }
 
+export type ExerciseCandidate = Exercise & {
+  referenceSolution: string
+}
+
+export type NextExerciseResponse =
+  | {
+      mode: 'ready'
+      exercise: Exercise
+    }
+  | {
+      mode: 'verify'
+      candidate: ExerciseCandidate
+    }
+
 export type ExerciseTestResult = {
   name: string
   status: 'passed' | 'failed'
@@ -37,6 +51,13 @@ export type ExerciseSubmissionResult = {
   passed: boolean
   perAttemptScore: number
   examinerReviewMd: string | null
+}
+
+export type ChatRole = 'user' | 'assistant'
+
+export type ChatEntry = {
+  role: ChatRole
+  content: string
 }
 
 export type CompetenceTopic = {
@@ -114,14 +135,49 @@ export async function fetchAppState() {
 }
 
 export async function fetchNextExercise() {
-  return apiFetch<{ exercise: Exercise }>('/api/exercise/next', {
+  return apiFetch<NextExerciseResponse>('/api/exercise/next', {
     method: 'POST',
     body: JSON.stringify({}),
   })
 }
 
+export async function confirmVerifiedExercise(candidate: ExerciseCandidate) {
+  return apiFetch<{ mode: 'ready'; exercise: Exercise }>('/api/exercise/next', {
+    method: 'POST',
+    body: JSON.stringify({
+      verification: {
+        candidate,
+        passed: true,
+      },
+    }),
+  })
+}
+
 export async function submitExercise(payload: ExerciseSubmission) {
   return apiFetch<ExerciseSubmissionResult>('/api/exercise/submit', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function sendChatMessage(payload: {
+  exerciseId: string
+  code: string
+  history: ChatEntry[]
+  message: string
+}) {
+  return apiFetch<{ message: string }>('/api/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function requestRecall(payload: {
+  code: string
+  hint: string
+  lineContext?: string
+}) {
+  return apiFetch<{ message: string }>('/api/recall', {
     method: 'POST',
     body: JSON.stringify(payload),
   })

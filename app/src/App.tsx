@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import {
   autocompletion,
@@ -9,16 +9,21 @@ import {
 import { python } from '@codemirror/lang-python'
 import { indentOnInput, indentUnit } from '@codemirror/language'
 import { EditorState } from '@codemirror/state'
+import type { EditorView } from '@codemirror/view'
 import { oneDark } from '@codemirror/theme-one-dark'
 import './App.css'
 import {
+  confirmVerifiedExercise,
   fetchAppState,
   fetchNextExercise,
   getApiConfig,
+  requestRecall,
+  sendChatMessage,
   submitExercise,
   type AppState,
+  type ChatEntry,
   type Exercise,
-  type ExerciseSubmissionResult,
+  type NextExerciseResponse,
 } from './lib/api'
 import {
   ensureJediLoaded,
@@ -46,6 +51,8 @@ type CompletionState = 'loading' | 'ready' | 'error'
 type BackendState = 'loading' | 'ready' | 'error' | 'unconfigured'
 type ExerciseState = 'loading' | 'ready' | 'error' | 'unconfigured'
 type SubmissionState = 'idle' | 'submitting' | 'success' | 'error'
+type ChatState = 'idle' | 'sending' | 'error'
+type RecallState = 'idle' | 'loading' | 'success' | 'error'
 
 function getCompletionStart(code: string, position: number) {
   let start = position
@@ -80,6 +87,37 @@ function pluralize(count: number, singular: string, plural: string) {
   return count === 1 ? singular : plural
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  )
+}
+
+function buildRunErrorMessage(run: PythonRunResult) {
+  const failedTests = run.tests.filter((test) => test.status === 'failed')
+
+  if (run.stderr.trim()) {
+    return `I just ran the code and got this error:\n\n${run.stderr.trim()}\n\nCan you explain what's going wrong?`
+  }
+
+  if (failedTests.length > 0) {
+    const summary = failedTests
+      .slice(0, 2)
+      .map((test) => `${test.name}: ${test.message}`)
+      .join('\n\n')
+
+    return `I just ran the code and some tests failed:\n\n${summary}\n\nCan you explain what's going wrong?`
+  }
+
+  return 'I just ran the code and it failed. Can you explain what to check next?'
+}
+
+function formatMessageContent(content: string) {
+  return content.replace(/```(?:python)?\n?/g, '').trim()
+}
+
 function App() {
   const hasApiConfig = getApiConfig() !== null
   const [code, setCode] = useState(STARTER_CODE)
@@ -98,7 +136,7 @@ function App() {
     hasApiConfig ? 'loading' : 'unconfigured',
   )
   const [exerciseError, setExerciseError] = useState(
-    hasApiConfig ? '' : 'Configure the worker to load hardcoded exercises.',
+    hasApiConfig ? '' : 'Configure the worker to load exercises.',
   )
   const [currentExercise, setCurrentExercise] = useState<Exercise | null>(null)
   const [isRunning, setIsRunning] = useState(false)
@@ -107,7 +145,21 @@ function App() {
   const [exerciseStartedAt, setExerciseStartedAt] = useState<number | null>(null)
   const [submissionState, setSubmissionState] = useState<SubmissionState>('idle')
   const [submissionError, setSubmissionError] = useState('')
-  const [submissionResult, setSubmissionResult] = useState<ExerciseSubmissionResult | null>(null)
+  const [chatMessages, setChatMessages] = useState<ChatEntry[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatState, setChatState] = useState<ChatState>('idle')
+  const [chatError, setChatError] = useState('')
+  const [chatUsedCount, setChatUsedCount] = useState(0)
+  const [recallOpen, setRecallOpen] = useState(false)
+  const [recallInput, setRecallInput] = useState('')
+  const [recallState, setRecallState] = useState<RecallState>('idle')
+  const [recallMessage, setRecallMessage] = useState('')
+  const [recallUsedCount, setRecallUsedCount] = useState(0)
+
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const recallInputRef = useRef<HTMLInputElement | null>(null)
+  const editorViewRef = useRef<EditorView | null>(null)
+  const lastAutoExplainSignatureRef = useRef('')
 
   const completionSource = useMemo<CompletionSource>(
     () =>
@@ -144,10 +196,7 @@ function App() {
           info: completion.docstring || completion.detail,
         }))
 
-        return {
-          from,
-          options,
-        }
+        return { from, options }
       },
     [completionState],
   )
@@ -162,6 +211,27 @@ function App() {
     ],
     [completionSource],
   )
+
+  const resetExerciseUi = useCallback((exercise: Exercise) => {
+    setCurrentExercise(exercise)
+    setCode(exercise.starterCode ?? '')
+    setLastRun(null)
+    setRunCount(0)
+    setExerciseStartedAt(Date.now())
+    setSubmissionState('idle')
+    setSubmissionError('')
+    setChatMessages([])
+    setChatInput('')
+    setChatState('idle')
+    setChatError('')
+    setChatUsedCount(0)
+    setRecallOpen(false)
+    setRecallInput('')
+    setRecallState('idle')
+    setRecallMessage('')
+    setRecallUsedCount(0)
+    lastAutoExplainSignatureRef.current = ''
+  }, [])
 
   const refreshAppState = useCallback(async () => {
     if (!hasApiConfig) {
@@ -183,6 +253,34 @@ function App() {
     }
   }, [hasApiConfig])
 
+  const resolveNextExercise = useCallback(
+    async function resolveNextExerciseResponse(
+      response: NextExerciseResponse,
+      remainingRetries: number,
+    ): Promise<Exercise> {
+      if (response.mode === 'ready') {
+        return response.exercise
+      }
+
+      const verificationRun = await runPythonWithTests(
+        response.candidate.referenceSolution,
+        response.candidate.tests,
+      )
+
+      if (verificationRun.passed) {
+        const confirmed = await confirmVerifiedExercise(response.candidate)
+        return confirmed.exercise
+      }
+
+      if (remainingRetries > 0) {
+        return resolveNextExerciseResponse(await fetchNextExercise(), remainingRetries - 1)
+      }
+
+      throw new Error('Generated exercise failed local verification.')
+    },
+    [],
+  )
+
   const loadNextExercise = useCallback(async () => {
     if (!hasApiConfig) {
       return
@@ -192,15 +290,9 @@ function App() {
     setExerciseError('')
 
     try {
-      const { exercise } = await fetchNextExercise()
-      setCurrentExercise(exercise)
-      setCode(exercise.starterCode ?? '')
-      setLastRun(null)
-      setRunCount(0)
-      setExerciseStartedAt(Date.now())
-      setSubmissionState('idle')
-      setSubmissionError('')
-      setSubmissionResult(null)
+      const response = await fetchNextExercise()
+      const exercise = await resolveNextExercise(response, 2)
+      resetExerciseUi(exercise)
       setExerciseState('ready')
     } catch (error) {
       setExerciseState('error')
@@ -208,7 +300,57 @@ function App() {
         error instanceof Error ? error.message : 'Failed to load next exercise.',
       )
     }
-  }, [hasApiConfig])
+  }, [hasApiConfig, resetExerciseUi, resolveNextExercise])
+
+  const getCurrentLineContext = useCallback(() => {
+    const view = editorViewRef.current
+
+    if (!view) {
+      return ''
+    }
+
+    const head = view.state.selection.main.head
+    return view.state.doc.lineAt(head).text
+  }, [])
+
+  const sendHelperRequest = useCallback(
+    async (message: string) => {
+      if (!currentExercise || chatState === 'sending') {
+        return
+      }
+
+      const trimmedMessage = message.trim()
+      if (!trimmedMessage) {
+        return
+      }
+
+      const history = chatMessages
+      setChatState('sending')
+      setChatError('')
+
+      try {
+        const response = await sendChatMessage({
+          exerciseId: currentExercise.id,
+          code,
+          history,
+          message: trimmedMessage,
+        })
+
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'user', content: trimmedMessage },
+          { role: 'assistant', content: response.message },
+        ])
+        setChatUsedCount((count) => count + 1)
+        setChatState('idle')
+        setChatInput('')
+      } catch (error) {
+        setChatState('error')
+        setChatError(error instanceof Error ? error.message : 'Chat request failed.')
+      }
+    },
+    [chatMessages, chatState, code, currentExercise],
+  )
 
   const handleRun = useCallback(async () => {
     if (runtimeState !== 'ready' || isRunning) {
@@ -248,7 +390,6 @@ function App() {
 
     setSubmissionState('submitting')
     setSubmissionError('')
-    setSubmissionResult(null)
 
     try {
       const result = await submitExercise({
@@ -256,8 +397,8 @@ function App() {
         submittedCode: code,
         passed: true,
         runCount,
-        recallUsedCount: 0,
-        chatUsedCount: 0,
+        recallUsedCount,
+        chatUsedCount,
         timeSpentSeconds: Math.max(
           0,
           Math.round(((Date.now() - (exerciseStartedAt ?? Date.now())) / 1000) || 0),
@@ -265,7 +406,15 @@ function App() {
         testResults: lastRun.tests,
       })
 
-      setSubmissionResult(result)
+      const review = result.examinerReviewMd
+
+      if (typeof review === 'string' && review.trim()) {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: review },
+        ])
+      }
+
       setSubmissionState('success')
       await refreshAppState()
     } catch (error) {
@@ -275,10 +424,12 @@ function App() {
       )
     }
   }, [
+    chatUsedCount,
     code,
     currentExercise,
     exerciseStartedAt,
     lastRun,
+    recallUsedCount,
     refreshAppState,
     runCount,
     submissionState,
@@ -291,7 +442,6 @@ function App() {
 
     setSubmissionState('submitting')
     setSubmissionError('')
-    setSubmissionResult(null)
 
     try {
       const result = await submitExercise({
@@ -299,8 +449,8 @@ function App() {
         submittedCode: code,
         passed: false,
         runCount,
-        recallUsedCount: 0,
-        chatUsedCount: 0,
+        recallUsedCount,
+        chatUsedCount,
         timeSpentSeconds: Math.max(
           0,
           Math.round(((Date.now() - (exerciseStartedAt ?? Date.now())) / 1000) || 0),
@@ -309,7 +459,15 @@ function App() {
         testResults: lastRun?.tests ?? [],
       })
 
-      setSubmissionResult(result)
+      const review = result.examinerReviewMd
+
+      if (typeof review === 'string' && review.trim()) {
+        setChatMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: review },
+        ])
+      }
+
       setSubmissionState('success')
       await refreshAppState()
       await loadNextExercise()
@@ -320,15 +478,42 @@ function App() {
       )
     }
   }, [
+    chatUsedCount,
     code,
     currentExercise,
     exerciseStartedAt,
     lastRun,
     loadNextExercise,
+    recallUsedCount,
     refreshAppState,
     runCount,
     submissionState,
   ])
+
+  const handleRecallSubmit = useCallback(async () => {
+    const trimmedHint = recallInput.trim()
+
+    if (!trimmedHint || recallState === 'loading') {
+      return
+    }
+
+    setRecallState('loading')
+    setRecallMessage('')
+
+    try {
+      const response = await requestRecall({
+        code,
+        hint: trimmedHint,
+        lineContext: getCurrentLineContext(),
+      })
+      setRecallMessage(response.message)
+      setRecallUsedCount((count) => count + 1)
+      setRecallState('success')
+    } catch (error) {
+      setRecallState('error')
+      setRecallMessage(error instanceof Error ? error.message : 'Recall request failed.')
+    }
+  }, [code, getCurrentLineContext, recallInput, recallState])
 
   useEffect(() => {
     let cancelled = false
@@ -379,6 +564,22 @@ function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') {
+        event.preventDefault()
+        chatInputRef.current?.focus()
+        return
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setRecallOpen(true)
+        return
+      }
+
+      if (isEditableTarget(event.target)) {
+        return
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
         void handleRun()
@@ -404,8 +605,11 @@ function App() {
       return
     }
 
-    void Promise.all([fetchAppState(), fetchNextExercise()])
-      .then(([stateResponse, exerciseResponse]) => {
+    void Promise.all([
+      fetchAppState(),
+      fetchNextExercise().then((response) => resolveNextExercise(response, 2)),
+    ])
+      .then(([stateResponse, exercise]) => {
         if (cancelled) {
           return
         }
@@ -413,15 +617,7 @@ function App() {
         setAppState(stateResponse)
         setBackendState('ready')
         setBackendError('')
-
-        setCurrentExercise(exerciseResponse.exercise)
-        setCode(exerciseResponse.exercise.starterCode ?? '')
-        setLastRun(null)
-        setRunCount(0)
-        setExerciseStartedAt(Date.now())
-        setSubmissionState('idle')
-        setSubmissionError('')
-        setSubmissionResult(null)
+        resetExerciseUi(exercise)
         setExerciseState('ready')
         setExerciseError('')
       })
@@ -442,9 +638,46 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [hasApiConfig])
+  }, [hasApiConfig, resetExerciseUi, resolveNextExercise])
 
-  const canSubmit = Boolean(currentExercise && lastRun?.passed && !isRunning)
+  useEffect(() => {
+    if (recallOpen) {
+      requestAnimationFrame(() => {
+        recallInputRef.current?.focus()
+      })
+    }
+  }, [recallOpen])
+
+  useEffect(() => {
+    if (!currentExercise || !lastRun || chatState === 'sending') {
+      return
+    }
+
+    const hasRunError = Boolean(lastRun.stderr.trim()) || lastRun.tests.some((test) => test.status === 'failed')
+
+    if (!hasRunError) {
+      return
+    }
+
+    const signature = JSON.stringify({
+      exerciseId: currentExercise.id,
+      stderr: lastRun.stderr,
+      failedTests: lastRun.tests
+        .filter((test) => test.status === 'failed')
+        .map((test) => ({ name: test.name, message: test.message })),
+    })
+
+    if (lastAutoExplainSignatureRef.current === signature) {
+      return
+    }
+
+    lastAutoExplainSignatureRef.current = signature
+    void sendHelperRequest(buildRunErrorMessage(lastRun))
+  }, [chatState, currentExercise, lastRun, sendHelperRequest])
+
+  const canSubmit = Boolean(
+    currentExercise && lastRun?.passed && !isRunning && submissionState !== 'success',
+  )
   const resetCode = currentExercise?.starterCode ?? STARTER_CODE
   const failedTests = lastRun?.tests.filter((test) => test.status === 'failed') ?? []
 
@@ -452,7 +685,7 @@ function App() {
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">Milestone 4</p>
+          <p className="eyebrow">Milestone 7</p>
           <h1>Python Learning App</h1>
         </div>
         <div className="header-actions">
@@ -519,7 +752,7 @@ function App() {
           ) : (
             <div className="panel-card">
               <p className={`status-copy status-copy--${exerciseState}`}>
-                {exerciseState === 'loading' && 'Loading hardcoded exercise...'}
+                {exerciseState === 'loading' && 'Loading exercise...'}
                 {exerciseState === 'error' && exerciseError}
                 {exerciseState === 'unconfigured' &&
                   'Worker config is missing, so the editor stays in local sample mode.'}
@@ -530,10 +763,10 @@ function App() {
           <div className="panel-card">
             <h3>Current scope</h3>
             <ul>
-              <li>Hardcoded exercise fetch loop through the worker</li>
-              <li>Browser-side test execution in Pyodide</li>
-              <li>Submit, skip, and next exercise controls</li>
-              <li>Competence map refresh after submission</li>
+              <li>Generated exercises verified locally before display</li>
+              <li>Helper chat in the current exercise context</li>
+              <li>Recall popup via Ctrl+K</li>
+              <li>Automatic error explanation after failed runs</li>
             </ul>
           </div>
 
@@ -569,16 +802,15 @@ function App() {
           <div className="editor-toolbar">
             <div>
               <h2>Editor</h2>
-              <p>
-                {currentExercise
-                  ? 'Run executes your solution and the exercise tests locally in the browser.'
-                  : 'Everything executes locally in the browser, including completions.'}
-              </p>
+              <p>Run executes your solution and the exercise tests locally in the browser.</p>
             </div>
             <div className="toolbar-actions">
               <span className="run-counter">
                 {runCount} {pluralize(runCount, 'run', 'runs')} this exercise
               </span>
+              <button className="ghost-button" onClick={() => setRecallOpen(true)}>
+                Recall
+              </button>
               <button
                 className="ghost-button"
                 onClick={() => setCode(resetCode)}
@@ -603,20 +835,62 @@ function App() {
                 closeBrackets: true,
               }}
               onChange={setCode}
+              onCreateEditor={(view) => {
+                editorViewRef.current = view
+              }}
             />
           </div>
+
+          {recallOpen ? (
+            <div className="recall-popup" role="dialog" aria-label="Syntax recall">
+              <div className="recall-popup__header">
+                <h3>Syntax Recall</h3>
+                <button className="ghost-button" onClick={() => setRecallOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <div className="recall-popup__body">
+                <input
+                  ref={recallInputRef}
+                  className="chat-input chat-input--single"
+                  value={recallInput}
+                  onChange={(event) => setRecallInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      setRecallOpen(false)
+                    }
+
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      void handleRecallSubmit()
+                    }
+                  }}
+                  placeholder="What are you trying to do?"
+                />
+                <button
+                  className="ghost-button"
+                  onClick={() => void handleRecallSubmit()}
+                  disabled={recallState === 'loading'}
+                >
+                  {recallState === 'loading' ? 'Looking up...' : 'Recall'}
+                </button>
+              </div>
+              {recallMessage ? (
+                <pre className="output-block recall-output">{formatMessageContent(recallMessage)}</pre>
+              ) : null}
+            </div>
+          ) : null}
 
           {completionState === 'error' ? (
             <p className="editor-note editor-note--error">{completionError}</p>
           ) : currentExercise ? (
             <p className="editor-note">
-              Use <code>Ctrl+Enter</code> to run tests and <code>Ctrl+Shift+Enter</code> to
-              submit after the last run is green.
+              Use <code>Ctrl+Enter</code> to run tests, <code>Ctrl+Shift+Enter</code> to submit,
+              <code> Ctrl+K</code> for syntax recall, and <code>Ctrl+L</code> to focus chat.
             </p>
           ) : (
             <p className="editor-note">
-              Start typing a name or press <code>Ctrl+Space</code> to request Jedi
-              completions.
+              Start typing a name or press <code>Ctrl+Space</code> to request Jedi completions.
             </p>
           )}
 
@@ -692,48 +966,59 @@ function App() {
           </section>
         </section>
 
-        <aside className="side-panel">
-          <h2>Session</h2>
-          <p>
-            LLM features are still intentionally off. This pane now shows the local
-            submission loop instead.
-          </p>
+        <aside className="side-panel side-panel--chat">
+          <div className="chat-header">
+            <div>
+              <h2>AI Chat</h2>
+              <p>Helper chat resets when you move to a new exercise.</p>
+            </div>
+            <div className="chat-meta">
+              <span className="run-counter">
+                {chatUsedCount} {pluralize(chatUsedCount, 'chat', 'chats')}
+              </span>
+              <span className="run-counter">
+                {recallUsedCount} {pluralize(recallUsedCount, 'recall', 'recalls')}
+              </span>
+            </div>
+          </div>
 
-          <div className="panel-card">
-            <h3>Latest submission</h3>
-            {submissionResult ? (
-              <div className="submission-summary">
-                <p className={`status-copy status-copy--${submissionResult.passed ? 'ready' : 'error'}`}>
-                  {submissionResult.passed ? 'Passed and recorded.' : 'Recorded without a pass.'}
+          <div className="chat-thread">
+            {chatMessages.length === 0 ? (
+              <div className="panel-card">
+                <p className="status-copy">
+                  Ask for a hint, explanation, or error help. Failed runs will also auto-trigger a
+                  short explanation here.
                 </p>
-                <p>Score: {submissionResult.perAttemptScore.toFixed(2)}</p>
-                {submissionResult.examinerReviewMd ? (
-                  <pre className="output-block">{submissionResult.examinerReviewMd}</pre>
-                ) : null}
               </div>
-            ) : submissionState === 'submitting' ? (
-              <p className="status-copy status-copy--loading">Submitting attempt...</p>
-            ) : submissionState === 'error' ? (
-              <p className="status-copy status-copy--error">{submissionError}</p>
             ) : (
-              <p className="status-copy">Run the exercise, then submit once the tests pass.</p>
+              chatMessages.map((entry, index) => (
+                <div key={`${entry.role}-${index}`} className={`chat-message chat-message--${entry.role}`}>
+                  <div className="chat-message__role">{entry.role === 'user' ? 'You' : 'AI'}</div>
+                  <pre className="chat-message__content">{formatMessageContent(entry.content)}</pre>
+                </div>
+              ))
             )}
           </div>
 
-          <div className="panel-card">
-            <h3>Recent history</h3>
-            {appState?.recentHistory.length ? (
-              <div className="history-list">
-                {appState.recentHistory.slice(0, 5).map((attempt) => (
-                  <div key={attempt.id} className="history-item">
-                    <span>{attempt.exerciseId}</span>
-                    <span>{attempt.perAttemptScore.toFixed(2)}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="status-copy">No attempts recorded yet.</p>
-            )}
+          {submissionError ? <p className="editor-note editor-note--error">{submissionError}</p> : null}
+          {chatError ? <p className="editor-note editor-note--error">{chatError}</p> : null}
+
+          <div className="chat-composer">
+            <textarea
+              ref={chatInputRef}
+              className="chat-input"
+              value={chatInput}
+              onChange={(event) => setChatInput(event.target.value)}
+              placeholder="Ask for a hint, explanation, or approach..."
+              rows={4}
+            />
+            <button
+              className="primary-button"
+              onClick={() => void sendHelperRequest(chatInput)}
+              disabled={!currentExercise || chatState === 'sending' || !chatInput.trim()}
+            >
+              {chatState === 'sending' ? 'Sending...' : 'Send'}
+            </button>
           </div>
         </aside>
       </main>
