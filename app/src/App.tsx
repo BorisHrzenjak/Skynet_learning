@@ -183,6 +183,9 @@ function App() {
   const [exerciseState, setExerciseState] = useState<ExerciseState>(
     hasApiConfig ? 'loading' : 'unconfigured',
   )
+  const [exerciseLoadingMessage, setExerciseLoadingMessage] = useState(
+    hasApiConfig ? 'Choosing the next exercise...' : '',
+  )
   const [exerciseError, setExerciseError] = useState(
     hasApiConfig ? '' : 'Configure the worker to load exercises.',
   )
@@ -345,8 +348,11 @@ function App() {
       remainingRetries: number,
     ): Promise<Exercise> {
       if (response.mode === 'ready') {
+        setExerciseLoadingMessage('Loading a cached exercise...')
         return response.exercise
       }
+
+      setExerciseLoadingMessage('Generating and verifying a new exercise...')
 
       const verificationRun = await runPythonWithTests(
         response.candidate.referenceSolution,
@@ -370,6 +376,7 @@ function App() {
       }
 
       if (remainingRetries > 0) {
+        setExerciseLoadingMessage('Retrying after a failed generated exercise check...')
         return resolveNextExerciseResponse(await fetchNextExercise(), remainingRetries - 1)
       }
 
@@ -384,6 +391,7 @@ function App() {
     }
 
     setExerciseState('loading')
+    setExerciseLoadingMessage('Choosing the next exercise...')
     setExerciseError('')
 
     try {
@@ -391,6 +399,7 @@ function App() {
       const exercise = await resolveNextExercise(response, 2)
       resetExerciseUi(exercise)
       setExerciseState('ready')
+      setExerciseLoadingMessage('')
     } catch (error) {
       setExerciseState('error')
       setExerciseError(
@@ -768,6 +777,7 @@ function App() {
         setBackendError('')
         resetExerciseUi(exercise)
         setExerciseState('ready')
+        setExerciseLoadingMessage('')
         setExerciseError('')
       })
       .catch((error: unknown) => {
@@ -918,7 +928,7 @@ function App() {
           ) : (
             <div className="panel-card">
               <p className={`status-copy status-copy--${exerciseState}`}>
-                {exerciseState === 'loading' && 'Loading exercise...'}
+                {exerciseState === 'loading' && exerciseLoadingMessage}
                 {exerciseState === 'error' && exerciseError}
                 {exerciseState === 'unconfigured' &&
                   'Worker config is missing, so the editor stays in local sample mode.'}
@@ -943,7 +953,7 @@ function App() {
             <p className={`status-copy status-copy--${backendState}`}>
               {backendState === 'loading' && 'Loading /api/state...'}
               {backendState === 'ready' &&
-                `Loaded ${appState?.competenceMap.length ?? 0} topics from the worker.`}
+                `Loaded ${appState?.competenceMap.length ?? 0} topic definitions and your current progress.`}
               {backendState === 'error' && backendError}
               {backendState === 'unconfigured' && backendError}
             </p>
