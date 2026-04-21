@@ -1,4 +1,4 @@
-export const HELPER_SYSTEM_PROMPT = `You are the helper for a Python learning app.
+export const HELPER_SYSTEM_PROMPT = `You are the helper for Skynet learning.
 
 Your job is to help the user make progress on the current exercise without unnecessary chatter.
 

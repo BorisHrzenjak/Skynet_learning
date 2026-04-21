@@ -9,6 +9,11 @@ type OpenRouterResponse = {
       content?: string | Array<{ type?: string; text?: string }>
     }
   }>
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  }
 }
 
 type OpenRouterContent = string | Array<{ type?: string; text?: string }> | undefined
@@ -65,8 +70,17 @@ export async function createChatCompletion(options: {
   const content = readContent(payload.choices?.[0]?.message?.content)
 
   if (!content.trim()) {
-    throw new Error('OpenRouter returned an empty examiner response.')
+    throw new Error('OpenRouter returned an empty response.')
   }
 
-  return content.trim()
+  return {
+    content: content.trim(),
+    usage: payload.usage
+      ? {
+          promptTokens: payload.usage.prompt_tokens ?? 0,
+          completionTokens: payload.usage.completion_tokens ?? 0,
+          totalTokens: payload.usage.total_tokens ?? 0,
+        }
+      : null,
+  }
 }

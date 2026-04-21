@@ -3,4 +3,4 @@ OPENROUTER_API_KEY=replace-with-openrouter-key
 # Optional:
 # OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 # OPENROUTER_HTTP_REFERER=http://127.0.0.1:5173
-# OPENROUTER_APP_TITLE=Python Learning App
+# OPENROUTER_APP_TITLE=Skynet learning

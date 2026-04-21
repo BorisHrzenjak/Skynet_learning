@@ -1,4 +1,4 @@
-export const GENERATOR_SYSTEM_PROMPT = `You generate Python exercises for a browser-only Python learning app.
+export const GENERATOR_SYSTEM_PROMPT = `You generate Python exercises for Skynet learning, a browser-only Python learning app.
 
 Output requirements:
 - Return valid JSON only. No markdown fences. No surrounding explanation.

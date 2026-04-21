@@ -91,7 +91,19 @@ export type AppState = {
   competenceMap: CompetenceTopic[]
   recentHistory: RecentAttempt[]
   settings: AppSettings
+  spend: {
+    dailyUsd: number
+    monthlyUsd: number
+  }
   currentDifficultyBand: DifficultyBand
+}
+
+export type SettingsUpdate = {
+  costCapDailyUsd: number | null
+  costCapMonthlyUsd: number | null
+  modelOverrides: Record<string, string>
+  preferredTopics: string[]
+  unlockThresholds: Record<string, number>
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit) {
@@ -111,7 +123,18 @@ async function apiFetch<T>(path: string, init?: RequestInit) {
   })
 
   if (!response.ok) {
-    throw new Error(`${path} failed with ${response.status}.`)
+    let errorMessage = `${path} failed with ${response.status}.`
+
+    try {
+      const payload = (await response.json()) as { error?: string }
+      if (typeof payload.error === 'string' && payload.error.trim()) {
+        errorMessage = payload.error
+      }
+    } catch {
+      // Keep the fallback status-based message.
+    }
+
+    throw new Error(errorMessage)
   }
 
   return (await response.json()) as T
@@ -146,7 +169,7 @@ export async function confirmVerifiedExercise(candidate: ExerciseCandidate) {
     method: 'POST',
     body: JSON.stringify({
       verification: {
-        candidate,
+        candidateId: candidate.id,
         passed: true,
       },
     }),
@@ -178,6 +201,13 @@ export async function requestRecall(payload: {
   lineContext?: string
 }) {
   return apiFetch<{ message: string }>('/api/recall', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function saveSettings(payload: SettingsUpdate) {
+  return apiFetch<AppState>('/api/settings', {
     method: 'POST',
     body: JSON.stringify(payload),
   })

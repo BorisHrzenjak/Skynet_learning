@@ -1,28 +1,49 @@
 :root {
   color-scheme: dark;
-  font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  line-height: 1.55;
   font-weight: 400;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  --bg: #0b1020;
-  --bg-accent: radial-gradient(circle at top, rgba(87, 108, 188, 0.2), transparent 32%);
-  --panel: rgba(17, 24, 39, 0.92);
-  --panel-muted: rgba(15, 23, 42, 0.88);
-  --border: rgba(148, 163, 184, 0.18);
-  --border-strong: rgba(148, 163, 184, 0.34);
-  --text-primary: #e5eefb;
-  --text-secondary: #9aa8c7;
-  --muted: #7e8eb1;
-  --accent: #6ee7ff;
-  --success: #4ade80;
-  --warning: #fbbf24;
-  --danger: #fb7185;
-  --shadow: 0 18px 40px rgba(2, 6, 23, 0.35);
-  --mono: 'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  /* Background */
+  --bg: #0b0f14;
+
+  /* Surfaces */
+  --panel: rgba(18, 24, 33, 0.82);
+  --panel-muted: rgba(13, 18, 27, 0.88);
+
+  /* Borders */
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.11);
+
+  /* Text */
+  --text-primary: #c8d4e6;
+  --text-secondary: #627080;
+  --muted: #3e4e60;
+
+  /* Accent: muted teal-blue */
+  --accent: #4a90b8;
+  --accent-glow: rgba(74, 144, 184, 0.14);
+  --accent-dim: rgba(74, 144, 184, 0.65);
+
+  /* Status */
+  --success: #38b06a;
+  --success-glow: rgba(56, 176, 106, 0.10);
+  --warning: #d4922a;
+  --warning-glow: rgba(212, 146, 42, 0.10);
+  --danger: #cc4f65;
+  --danger-glow: rgba(204, 79, 101, 0.10);
+
+  /* Shadow */
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.22);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.28);
+
+  /* Mono */
+  --mono: 'Cascadia Code', 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
 * {
@@ -37,10 +58,25 @@ body,
 }
 
 body {
-  background:
-    var(--bg-accent),
-    linear-gradient(180deg, #0b1020 0%, #0a0f1b 100%);
+  background: linear-gradient(160deg, #0b0f14 0%, #0f141a 100%);
+  background-attachment: fixed;
   color: var(--text-primary);
+  position: relative;
+}
+
+/* Radial center glow for depth */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 22%, rgba(40, 80, 130, 0.07) 0%, transparent 62%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
 }
 
 button,

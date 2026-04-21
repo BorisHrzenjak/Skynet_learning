@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   autocompletion,
   type Completion,
@@ -18,6 +20,7 @@ import {
   fetchNextExercise,
   getApiConfig,
   requestRecall,
+  saveSettings,
   sendChatMessage,
   submitExercise,
   type AppState,
@@ -53,6 +56,18 @@ type ExerciseState = 'loading' | 'ready' | 'error' | 'unconfigured'
 type SubmissionState = 'idle' | 'submitting' | 'success' | 'error'
 type ChatState = 'idle' | 'sending' | 'error'
 type RecallState = 'idle' | 'loading' | 'success' | 'error'
+type SettingsSaveState = 'idle' | 'saving' | 'success' | 'error'
+
+type SettingsDraft = {
+  costCapDailyUsd: string
+  costCapMonthlyUsd: string
+  modelOverrides: Record<string, string>
+  preferredTopics: string[]
+  unlockThresholds: {
+    intermediate: string
+    advanced: string
+  }
+}
 
 function getCompletionStart(code: string, position: number) {
   let start = position
@@ -114,8 +129,41 @@ function buildRunErrorMessage(run: PythonRunResult) {
   return 'I just ran the code and it failed. Can you explain what to check next?'
 }
 
-function formatMessageContent(content: string) {
-  return content.replace(/```(?:python)?\n?/g, '').trim()
+function stripTrailingNewline(value: string) {
+  return value.endsWith('\n') ? value.slice(0, -1) : value
+}
+
+function buildSettingsDraft(appState: AppState): SettingsDraft {
+  return {
+    costCapDailyUsd:
+      appState.settings.costCapDailyUsd === null ? '' : String(appState.settings.costCapDailyUsd),
+    costCapMonthlyUsd:
+      appState.settings.costCapMonthlyUsd === null
+        ? ''
+        : String(appState.settings.costCapMonthlyUsd),
+    modelOverrides: {
+      generator: appState.settings.models.generator,
+      examiner: appState.settings.models.examiner,
+      helper: appState.settings.models.helper,
+      recall: appState.settings.models.recall,
+    },
+    preferredTopics: appState.settings.preferredTopics,
+    unlockThresholds: {
+      intermediate: String(appState.settings.unlockThresholds.intermediate ?? 0.8),
+      advanced: String(appState.settings.unlockThresholds.advanced ?? 0.85),
+    },
+  }
+}
+
+function parseNullableNumber(value: string) {
+  const trimmed = value.trim()
+
+  if (!trimmed) {
+    return null
+  }
+
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function App() {
@@ -155,6 +203,10 @@ function App() {
   const [recallState, setRecallState] = useState<RecallState>('idle')
   const [recallMessage, setRecallMessage] = useState('')
   const [recallUsedCount, setRecallUsedCount] = useState(0)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null)
+  const [settingsSaveState, setSettingsSaveState] = useState<SettingsSaveState>('idle')
+  const [settingsError, setSettingsError] = useState('')
 
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null)
   const recallInputRef = useRef<HTMLInputElement | null>(null)
@@ -210,6 +262,40 @@ function App() {
       autocompletion({ override: [completionSource] }),
     ],
     [completionSource],
+  )
+
+  const markdownComponents = useMemo(
+    () => ({
+      code(props: { className?: string; children?: React.ReactNode }) {
+        const value = stripTrailingNewline(String(props.children ?? ''))
+        const languageMatch = /language-(\w+)/.exec(props.className ?? '')
+        const language = languageMatch?.[1]?.toLowerCase()
+        const isInline = !props.className && !value.includes('\n')
+
+        if (isInline) {
+          return <code className="prompt-inline-code">{value}</code>
+        }
+
+        return (
+          <div className="prompt-code-block">
+            <CodeMirror
+              value={value}
+              theme={oneDark}
+              editable={false}
+              readOnly
+              extensions={language === 'python' || language === 'py' ? [python()] : []}
+              basicSetup={{
+                lineNumbers: true,
+                foldGutter: false,
+                highlightActiveLine: false,
+                highlightActiveLineGutter: false,
+              }}
+            />
+          </div>
+        )
+      },
+    }),
+    [],
   )
 
   const resetExerciseUi = useCallback((exercise: Exercise) => {
@@ -268,8 +354,19 @@ function App() {
       )
 
       if (verificationRun.passed) {
-        const confirmed = await confirmVerifiedExercise(response.candidate)
-        return confirmed.exercise
+        try {
+          const confirmed = await confirmVerifiedExercise(response.candidate)
+          return confirmed.exercise
+        } catch {
+          return {
+            id: response.candidate.id,
+            promptMd: response.candidate.promptMd,
+            starterCode: response.candidate.starterCode,
+            tests: response.candidate.tests,
+            difficultyBand: response.candidate.difficultyBand,
+            topics: response.candidate.topics,
+          }
+        }
       }
 
       if (remainingRetries > 0) {
@@ -515,6 +612,58 @@ function App() {
     }
   }, [code, getCurrentLineContext, recallInput, recallState])
 
+  const handleExplainTask = useCallback(async () => {
+    if (!currentExercise) {
+      return
+    }
+
+    await sendHelperRequest(
+      "Explain this task in plain language like to a teenager who's learning to code. Do not solve it. Focus on what goes in, what should come out, and any tricky rules.",
+    )
+  }, [currentExercise, sendHelperRequest])
+
+  const openSettings = useCallback(() => {
+    if (!appState) {
+      return
+    }
+
+    setSettingsDraft(buildSettingsDraft(appState))
+    setSettingsError('')
+    setSettingsSaveState('idle')
+    setSettingsOpen(true)
+  }, [appState])
+
+  const handleSaveSettings = useCallback(async () => {
+    if (!settingsDraft) {
+      return
+    }
+
+    setSettingsSaveState('saving')
+    setSettingsError('')
+
+    try {
+      const nextState = await saveSettings({
+        costCapDailyUsd: parseNullableNumber(settingsDraft.costCapDailyUsd),
+        costCapMonthlyUsd: parseNullableNumber(settingsDraft.costCapMonthlyUsd),
+        modelOverrides: settingsDraft.modelOverrides,
+        preferredTopics: settingsDraft.preferredTopics,
+        unlockThresholds: {
+          intermediate: parseNullableNumber(settingsDraft.unlockThresholds.intermediate) ?? 0.8,
+          advanced: parseNullableNumber(settingsDraft.unlockThresholds.advanced) ?? 0.85,
+        },
+      })
+
+      setAppState(nextState)
+      setBackendState('ready')
+      setBackendError('')
+      setSettingsSaveState('success')
+      setSettingsOpen(false)
+    } catch (error) {
+      setSettingsSaveState('error')
+      setSettingsError(error instanceof Error ? error.message : 'Failed to save settings.')
+    }
+  }, [settingsDraft])
+
   useEffect(() => {
     let cancelled = false
 
@@ -685,8 +834,8 @@ function App() {
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">Milestone 7</p>
-          <h1>Python Learning App</h1>
+          <p className="eyebrow">Milestone 9</p>
+          <h1>Skynet learning</h1>
         </div>
         <div className="header-actions">
           <span className={`runtime-pill runtime-pill--${runtimeState}`}>
@@ -699,6 +848,9 @@ function App() {
             {completionState === 'ready' && 'Completions ready'}
             {completionState === 'error' && 'Completions failed'}
           </span>
+          <button className="ghost-button" onClick={openSettings} disabled={!appState}>
+            Settings
+          </button>
           <button
             className="ghost-button"
             onClick={() => void handleSubmit()}
@@ -730,9 +882,23 @@ function App() {
                 ))}
               </div>
               <article className="prompt-card">
-                <div className="prompt-markdown">{currentExercise.promptMd}</div>
+                <div className="prompt-markdown">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={markdownComponents}
+                  >
+                    {currentExercise.promptMd}
+                  </ReactMarkdown>
+                </div>
               </article>
               <div className="prompt-actions">
+                <button
+                  className="ghost-button"
+                  onClick={() => void handleExplainTask()}
+                  disabled={chatState === 'sending'}
+                >
+                  {chatState === 'sending' ? 'Explaining...' : 'Explain'}
+                </button>
                 <button
                   className="ghost-button"
                   onClick={() => void handleSkip()}
@@ -764,6 +930,8 @@ function App() {
             <h3>Current scope</h3>
             <ul>
               <li>Generated exercises verified locally before display</li>
+              <li>Difficulty band mixes with lower-band retention</li>
+              <li>Weak-topic targeting with recent-topic variety</li>
               <li>Helper chat in the current exercise context</li>
               <li>Recall popup via Ctrl+K</li>
               <li>Automatic error explanation after failed runs</li>
@@ -792,6 +960,18 @@ function App() {
                 <div>
                   <dt>Topics</dt>
                   <dd>{appState.competenceMap.length}</dd>
+                </div>
+              </dl>
+            ) : null}
+            {appState ? (
+              <dl className="state-grid state-grid--spend">
+                <div>
+                  <dt>Daily spend</dt>
+                  <dd>${appState.spend.dailyUsd.toFixed(4)}</dd>
+                </div>
+                <div>
+                  <dt>Monthly spend</dt>
+                  <dd>${appState.spend.monthlyUsd.toFixed(4)}</dd>
                 </div>
               </dl>
             ) : null}
@@ -876,7 +1056,11 @@ function App() {
                 </button>
               </div>
               {recallMessage ? (
-                <pre className="output-block recall-output">{formatMessageContent(recallMessage)}</pre>
+                <div className="output-block recall-output markdown-content">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {recallMessage}
+                  </ReactMarkdown>
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -994,7 +1178,11 @@ function App() {
               chatMessages.map((entry, index) => (
                 <div key={`${entry.role}-${index}`} className={`chat-message chat-message--${entry.role}`}>
                   <div className="chat-message__role">{entry.role === 'user' ? 'You' : 'AI'}</div>
-                  <pre className="chat-message__content">{formatMessageContent(entry.content)}</pre>
+                  <div className="chat-message__content markdown-content">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {entry.content}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               ))
             )}
@@ -1022,6 +1210,169 @@ function App() {
           </div>
         </aside>
       </main>
+
+      {settingsOpen && settingsDraft ? (
+        <div className="settings-modal-backdrop" onClick={() => setSettingsOpen(false)}>
+          <section
+            className="settings-modal"
+            onClick={(event) => event.stopPropagation()}
+            aria-label="Settings"
+          >
+            <div className="settings-modal__header">
+              <div>
+                <h2>Settings</h2>
+                <p>Edit caps, models, topic preferences, and unlock thresholds.</p>
+              </div>
+              <button className="ghost-button" onClick={() => setSettingsOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>Daily cap (USD)</span>
+                <input
+                  className="chat-input chat-input--single"
+                  value={settingsDraft.costCapDailyUsd}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) =>
+                      prev ? { ...prev, costCapDailyUsd: event.target.value } : prev,
+                    )
+                  }
+                  placeholder="Leave empty for no cap"
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>Monthly cap (USD)</span>
+                <input
+                  className="chat-input chat-input--single"
+                  value={settingsDraft.costCapMonthlyUsd}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) =>
+                      prev ? { ...prev, costCapMonthlyUsd: event.target.value } : prev,
+                    )
+                  }
+                  placeholder="Leave empty for no cap"
+                />
+              </label>
+
+              {(['generator', 'examiner', 'helper', 'recall'] as const).map((role) => (
+                <label key={role} className="settings-field">
+                  <span>{role} model</span>
+                  <input
+                    className="chat-input chat-input--single"
+                    value={settingsDraft.modelOverrides[role] ?? ''}
+                    onChange={(event) =>
+                      setSettingsDraft((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              modelOverrides: {
+                                ...prev.modelOverrides,
+                                [role]: event.target.value,
+                              },
+                            }
+                          : prev,
+                      )
+                    }
+                  />
+                </label>
+              ))}
+
+              <label className="settings-field">
+                <span>Intermediate unlock threshold</span>
+                <input
+                  className="chat-input chat-input--single"
+                  value={settingsDraft.unlockThresholds.intermediate}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            unlockThresholds: {
+                              ...prev.unlockThresholds,
+                              intermediate: event.target.value,
+                            },
+                          }
+                        : prev,
+                    )
+                  }
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>Advanced unlock threshold</span>
+                <input
+                  className="chat-input chat-input--single"
+                  value={settingsDraft.unlockThresholds.advanced}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            unlockThresholds: {
+                              ...prev.unlockThresholds,
+                              advanced: event.target.value,
+                            },
+                          }
+                        : prev,
+                    )
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="settings-field">
+              <span>Preferred topics</span>
+              <div className="settings-topics">
+                {appState?.competenceMap.map((topic) => {
+                  const checked = settingsDraft.preferredTopics.includes(topic.topicId)
+                  return (
+                    <label key={topic.topicId} className="settings-topic-option">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) => {
+                          const nextChecked = event.target.checked
+                          setSettingsDraft((prev) => {
+                            if (!prev) {
+                              return prev
+                            }
+
+                            return {
+                              ...prev,
+                              preferredTopics: nextChecked
+                                ? [...prev.preferredTopics, topic.topicId]
+                                : prev.preferredTopics.filter((id) => id !== topic.topicId),
+                            }
+                          })
+                        }}
+                      />
+                      <span>{topic.displayName}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+
+            {settingsError ? <p className="editor-note editor-note--error">{settingsError}</p> : null}
+
+            <div className="settings-actions">
+              <button className="ghost-button" onClick={() => setSettingsOpen(false)}>
+                Cancel
+              </button>
+              <button
+                className="primary-button"
+                onClick={() => void handleSaveSettings()}
+                disabled={settingsSaveState === 'saving'}
+              >
+                {settingsSaveState === 'saving' ? 'Saving...' : 'Save settings'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }
