@@ -60,6 +60,7 @@ type SettingsSaveState = 'idle' | 'saving' | 'success' | 'error'
 type AppView = 'workspace' | 'stats'
 
 const IDLE_HINT_DELAY_MS = 25 * 60 * 1000
+const AUTO_EXPLAIN_STORAGE_KEY = 'skynet-learning:auto-explain-run-errors'
 
 type SettingsDraft = {
   costCapDailyUsd: string
@@ -228,6 +229,14 @@ function App() {
   const [lastInteractionAt, setLastInteractionAt] = useState<number | null>(null)
   const [hintVisible, setHintVisible] = useState(false)
   const [hintHandled, setHintHandled] = useState(false)
+  const [autoExplainRunErrors, setAutoExplainRunErrors] = useState(() => {
+    if (typeof window === 'undefined') {
+      return true
+    }
+
+    const stored = window.localStorage.getItem(AUTO_EXPLAIN_STORAGE_KEY)
+    return stored === null ? true : stored === 'true'
+  })
   const [promptCollapsed, setPromptCollapsed] = useState(false)
   const [chatCollapsed, setChatCollapsed] = useState(false)
   const [outputCollapsed, setOutputCollapsed] = useState(false)
@@ -892,6 +901,10 @@ function App() {
   }, [hasApiConfig, resetExerciseUi, resolveNextExercise])
 
   useEffect(() => {
+    window.localStorage.setItem(AUTO_EXPLAIN_STORAGE_KEY, String(autoExplainRunErrors))
+  }, [autoExplainRunErrors])
+
+  useEffect(() => {
     if (recallOpen) {
       positionRecallPopup()
       requestAnimationFrame(() => {
@@ -924,7 +937,7 @@ function App() {
   }, [appView, currentExercise, exerciseStartedAt, hintHandled, hintVisible, lastInteractionAt])
 
   useEffect(() => {
-    if (!currentExercise || !lastRun || chatState === 'sending') {
+    if (!autoExplainRunErrors || !currentExercise || !lastRun || chatState === 'sending') {
       return
     }
 
@@ -948,7 +961,7 @@ function App() {
 
     lastAutoExplainSignatureRef.current = signature
     void sendHelperRequest(buildRunErrorMessage(lastRun))
-  }, [chatState, currentExercise, lastRun, sendHelperRequest])
+  }, [autoExplainRunErrors, chatState, currentExercise, lastRun, sendHelperRequest])
 
   const canSubmit = Boolean(
     currentExercise && lastRun?.passed && !isRunning && submissionState !== 'success',
@@ -1600,6 +1613,15 @@ function App() {
               </label>
             </div>
 
+            <label className="settings-topic-option settings-topic-option--toggle">
+              <input
+                type="checkbox"
+                checked={autoExplainRunErrors}
+                onChange={(event) => setAutoExplainRunErrors(event.target.checked)}
+              />
+              <span>Auto-explain run errors in chat</span>
+            </label>
+
             <div className="settings-field">
               <span>Preferred topics</span>
               <div className="settings-topics">
@@ -1630,6 +1652,20 @@ function App() {
                     </label>
                   )
                 })}
+              </div>
+            </div>
+
+            <div className="settings-field">
+              <span>Inspectable prompts</span>
+              <div className="settings-prompts">
+                {appState ? (
+                  (['generator', 'examiner', 'helper', 'recall'] as const).map((role) => (
+                    <details key={role} className="settings-prompt-card">
+                      <summary>{role}</summary>
+                      <pre className="output-block settings-prompt-block">{appState.prompts[role]}</pre>
+                    </details>
+                  ))
+                ) : null}
               </div>
             </div>
 

@@ -95,6 +95,12 @@ export type AppState = {
     dailyUsd: number
     monthlyUsd: number
   }
+  prompts: {
+    generator: string
+    examiner: string
+    helper: string
+    recall: string
+  }
   summary: {
     totalAttempts: number
     totalTimeSpentSeconds: number

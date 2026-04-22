@@ -1,4 +1,5 @@
 import { DEFAULT_UNLOCK_THRESHOLDS, MODELS } from './config/models'
+import { PYODIDE_PACKAGES } from './config/pyodidePackages'
 import {
   estimateUsageCost,
   getCurrentSpend,
@@ -562,6 +563,12 @@ async function getStatePayload(env: Env) {
       dailyUsd: currentSpend.dailyUsd,
       monthlyUsd: currentSpend.monthlyUsd,
     },
+    prompts: {
+      generator: GENERATOR_SYSTEM_PROMPT,
+      examiner: EXAMINER_SYSTEM_PROMPT,
+      helper: HELPER_SYSTEM_PROMPT,
+      recall: RECALL_SYSTEM_PROMPT,
+    },
     summary: {
       totalAttempts: attemptSummary?.total_attempts ?? 0,
       totalTimeSpentSeconds: attemptSummary?.total_time_spent_seconds ?? 0,
@@ -773,6 +780,7 @@ function buildGeneratorUserMessage(
     '- Tests must import from solution',
     '- Tests must use plain Python test_ functions and assert statements',
     '- Make the prompt easy to scan for a learner',
+    `- Additional available packages: ${PYODIDE_PACKAGES.length ? PYODIDE_PACKAGES.join(', ') : 'none (stdlib only)'}`,
     '',
     'Avoid repeating these recent exercise shapes:',
     ...recentSummaries.map((summary, index) => `${index + 1}. ${summary}`),
