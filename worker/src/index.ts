@@ -42,6 +42,11 @@ type AttemptRow = {
   difficulty_band: DifficultyBand | null
 }
 
+type AttemptSummaryRow = {
+  total_attempts: number | null
+  total_time_spent_seconds: number | null
+}
+
 type SettingsRow = {
   cost_cap_daily_usd: number | null
   cost_cap_monthly_usd: number | null
@@ -482,6 +487,15 @@ async function getStatePayload(env: Env) {
     `,
   ).all<AttemptRow>()
 
+  const attemptSummary = await env.DB.prepare(
+    `
+      SELECT
+        COUNT(*) AS total_attempts,
+        COALESCE(SUM(time_spent_seconds), 0) AS total_time_spent_seconds
+      FROM attempts
+    `,
+  ).first<AttemptSummaryRow>()
+
   const competenceMap = (topicResults.results ?? []).map((row) => ({
     topicId: row.topic_id,
     displayName: row.display_name,
@@ -505,6 +519,10 @@ async function getStatePayload(env: Env) {
     spend: {
       dailyUsd: currentSpend.dailyUsd,
       monthlyUsd: currentSpend.monthlyUsd,
+    },
+    summary: {
+      totalAttempts: attemptSummary?.total_attempts ?? 0,
+      totalTimeSpentSeconds: attemptSummary?.total_time_spent_seconds ?? 0,
     },
     currentDifficultyBand: getCurrentDifficultyBand(
       topicResults.results ?? [],

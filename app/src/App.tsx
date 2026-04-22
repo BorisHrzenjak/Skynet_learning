@@ -57,6 +57,7 @@ type SubmissionState = 'idle' | 'submitting' | 'success' | 'error'
 type ChatState = 'idle' | 'sending' | 'error'
 type RecallState = 'idle' | 'loading' | 'success' | 'error'
 type SettingsSaveState = 'idle' | 'saving' | 'success' | 'error'
+type AppView = 'workspace' | 'stats'
 
 type SettingsDraft = {
   costCapDailyUsd: string
@@ -166,6 +167,17 @@ function parseNullableNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+function formatDuration(totalSeconds: number) {
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+
+  return `${minutes}m`
+}
+
 function App() {
   const hasApiConfig = getApiConfig() !== null
   const [code, setCode] = useState(STARTER_CODE)
@@ -210,6 +222,7 @@ function App() {
   const [settingsDraft, setSettingsDraft] = useState<SettingsDraft | null>(null)
   const [settingsSaveState, setSettingsSaveState] = useState<SettingsSaveState>('idle')
   const [settingsError, setSettingsError] = useState('')
+  const [appView, setAppView] = useState<AppView>('workspace')
 
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null)
   const recallInputRef = useRef<HTMLInputElement | null>(null)
@@ -839,6 +852,14 @@ function App() {
   )
   const resetCode = currentExercise?.starterCode ?? STARTER_CODE
   const failedTests = lastRun?.tests.filter((test) => test.status === 'failed') ?? []
+  const sortedTopics = [...(appState?.competenceMap ?? [])].sort((left, right) => {
+    if (left.difficultyBand !== right.difficultyBand) {
+      const order = { basic: 0, intermediate: 1, advanced: 2 }
+      return order[left.difficultyBand] - order[right.difficultyBand]
+    }
+
+    return left.score - right.score
+  })
 
   return (
     <div className="app-shell">
@@ -861,6 +882,9 @@ function App() {
           <button className="ghost-button" onClick={openSettings} disabled={!appState}>
             Settings
           </button>
+          <button className="ghost-button" onClick={() => setAppView((view) => (view === 'workspace' ? 'stats' : 'workspace'))} disabled={!appState}>
+            {appView === 'workspace' ? 'Stats' : 'Back'}
+          </button>
           <button
             className="ghost-button"
             onClick={() => void handleSubmit()}
@@ -878,6 +902,91 @@ function App() {
         </div>
       </header>
 
+      {appView === 'stats' && appState ? (
+        <main className="stats-page">
+          <section className="stats-hero panel-card">
+            <div>
+              <p className="eyebrow">Stats</p>
+              <h2>Progress dashboard</h2>
+              <p>Transparent progress across topics, attempts, time spent, and model usage.</p>
+            </div>
+          </section>
+
+          <section className="stats-summary-grid">
+            <div className="panel-card stats-card">
+              <span>Current band</span>
+              <strong>{appState.currentDifficultyBand}</strong>
+            </div>
+            <div className="panel-card stats-card">
+              <span>Total attempts</span>
+              <strong>{appState.summary.totalAttempts}</strong>
+            </div>
+            <div className="panel-card stats-card">
+              <span>Total time spent</span>
+              <strong>{formatDuration(appState.summary.totalTimeSpentSeconds)}</strong>
+            </div>
+            <div className="panel-card stats-card">
+              <span>Monthly spend</span>
+              <strong>${appState.spend.monthlyUsd.toFixed(4)}</strong>
+            </div>
+          </section>
+
+          <section className="stats-layout">
+            <div className="panel-card">
+              <h3>Topic competence</h3>
+              <div className="topic-grid">
+                {sortedTopics.map((topic) => (
+                  <div key={topic.topicId} className="topic-card">
+                    <div className="topic-card__header">
+                      <span>{topic.displayName}</span>
+                      <span className={`difficulty-chip difficulty-chip--${topic.difficultyBand}`}>{topic.difficultyBand}</span>
+                    </div>
+                    <div className="topic-card__score-row">
+                      <strong>{topic.score.toFixed(2)}</strong>
+                      <span>{topic.attemptCount} attempts</span>
+                    </div>
+                    <div className="topic-card__bar">
+                      <div className="topic-card__bar-fill" style={{ width: `${Math.max(6, topic.score * 100)}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="stats-side-column">
+              <div className="panel-card">
+                <h3>Recent attempts</h3>
+                <div className="history-list">
+                  {appState.recentHistory.length ? (
+                    appState.recentHistory.map((attempt) => (
+                      <div key={attempt.id} className="history-item">
+                        <span>{attempt.exerciseId}</span>
+                        <span>{attempt.perAttemptScore.toFixed(2)}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="status-copy">No attempts recorded yet.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="panel-card">
+                <h3>Spend</h3>
+                <dl className="state-grid state-grid--spend">
+                  <div>
+                    <dt>Daily</dt>
+                    <dd>${appState.spend.dailyUsd.toFixed(4)}</dd>
+                  </div>
+                  <div>
+                    <dt>Monthly</dt>
+                    <dd>${appState.spend.monthlyUsd.toFixed(4)}</dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+          </section>
+        </main>
+      ) : (
       <main className="workspace">
         <aside className="side-panel">
           <h2>Prompt</h2>
@@ -1220,6 +1329,7 @@ function App() {
           </div>
         </aside>
       </main>
+      )}
 
       {settingsOpen && settingsDraft ? (
         <div className="settings-modal-backdrop" onClick={() => setSettingsOpen(false)}>

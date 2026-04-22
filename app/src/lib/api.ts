@@ -95,6 +95,10 @@ export type AppState = {
     dailyUsd: number
     monthlyUsd: number
   }
+  summary: {
+    totalAttempts: number
+    totalTimeSpentSeconds: number
+  }
   currentDifficultyBand: DifficultyBand
 }
 
