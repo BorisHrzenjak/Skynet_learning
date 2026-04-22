@@ -59,6 +59,8 @@ type RecallState = 'idle' | 'loading' | 'success' | 'error'
 type SettingsSaveState = 'idle' | 'saving' | 'success' | 'error'
 type AppView = 'workspace' | 'stats'
 
+const IDLE_HINT_DELAY_MS = 25 * 60 * 1000
+
 type SettingsDraft = {
   costCapDailyUsd: string
   costCapMonthlyUsd: string
@@ -223,10 +225,18 @@ function App() {
   const [settingsSaveState, setSettingsSaveState] = useState<SettingsSaveState>('idle')
   const [settingsError, setSettingsError] = useState('')
   const [appView, setAppView] = useState<AppView>('workspace')
+  const [lastInteractionAt, setLastInteractionAt] = useState<number | null>(null)
+  const [hintVisible, setHintVisible] = useState(false)
+  const [hintHandled, setHintHandled] = useState(false)
+  const [promptCollapsed, setPromptCollapsed] = useState(false)
+  const [chatCollapsed, setChatCollapsed] = useState(false)
+  const [outputCollapsed, setOutputCollapsed] = useState(false)
+  const [recallAnchor, setRecallAnchor] = useState<{ top: number; left: number } | null>(null)
 
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null)
   const recallInputRef = useRef<HTMLInputElement | null>(null)
   const editorViewRef = useRef<EditorView | null>(null)
+  const editorFrameRef = useRef<HTMLDivElement | null>(null)
   const lastAutoExplainSignatureRef = useRef('')
 
   const completionSource = useMemo<CompletionSource>(
@@ -332,7 +342,49 @@ function App() {
     setRecallState('idle')
     setRecallMessage('')
     setRecallUsedCount(0)
+    setLastInteractionAt(Date.now())
+    setHintVisible(false)
+    setHintHandled(false)
     lastAutoExplainSignatureRef.current = ''
+  }, [])
+
+  const noteExerciseActivity = useCallback(() => {
+    if (!currentExercise) {
+      return
+    }
+
+    setLastInteractionAt(Date.now())
+  }, [currentExercise])
+
+  const positionRecallPopup = useCallback(() => {
+    const view = editorViewRef.current
+    const frame = editorFrameRef.current
+
+    if (!view || !frame) {
+      setRecallAnchor(null)
+      return
+    }
+
+    const coords = view.coordsAtPos(view.state.selection.main.head)
+    const frameRect = frame.getBoundingClientRect()
+
+    if (!coords) {
+      setRecallAnchor({ top: 16, left: Math.max(16, frameRect.width - 360) })
+      return
+    }
+
+    const popupWidth = 360
+    const popupHeight = 220
+    const left = Math.min(
+      Math.max(16, coords.left - frameRect.left),
+      Math.max(16, frameRect.width - popupWidth - 16),
+    )
+    const top = Math.min(
+      Math.max(16, coords.bottom - frameRect.top + 12),
+      Math.max(16, frameRect.height - popupHeight - 16),
+    )
+
+    setRecallAnchor({ top, left })
   }, [])
 
   const refreshAppState = useCallback(async () => {
@@ -406,6 +458,7 @@ function App() {
     setExerciseState('loading')
     setExerciseLoadingMessage('Choosing the next exercise...')
     setExerciseError('')
+    setHintVisible(false)
 
     try {
       const response = await fetchNextExercise()
@@ -446,6 +499,7 @@ function App() {
       const history = chatMessages
       setChatState('sending')
       setChatError('')
+      noteExerciseActivity()
 
       try {
         const response = await sendChatMessage({
@@ -468,7 +522,15 @@ function App() {
         setChatError(error instanceof Error ? error.message : 'Chat request failed.')
       }
     },
-    [chatMessages, chatState, code, currentExercise],
+    [chatMessages, chatState, code, currentExercise, noteExerciseActivity],
+  )
+
+  const handleCodeChange = useCallback(
+    (value: string) => {
+      setCode(value)
+      noteExerciseActivity()
+    },
+    [noteExerciseActivity],
   )
 
   const handleRun = useCallback(async () => {
@@ -478,6 +540,7 @@ function App() {
 
     setIsRunning(true)
     setLastRun(null)
+    noteExerciseActivity()
 
     if (currentExercise) {
       setRunCount((count) => count + 1)
@@ -500,7 +563,7 @@ function App() {
     } finally {
       setIsRunning(false)
     }
-  }, [code, currentExercise, isRunning, runtimeState])
+  }, [code, currentExercise, isRunning, noteExerciseActivity, runtimeState])
 
   const handleSubmit = useCallback(async () => {
     if (!currentExercise || !lastRun?.passed || submissionState === 'submitting') {
@@ -509,6 +572,7 @@ function App() {
 
     setSubmissionState('submitting')
     setSubmissionError('')
+    noteExerciseActivity()
 
     try {
       const result = await submitExercise({
@@ -551,6 +615,7 @@ function App() {
     recallUsedCount,
     refreshAppState,
     runCount,
+    noteExerciseActivity,
     submissionState,
   ])
 
@@ -561,6 +626,7 @@ function App() {
 
     setSubmissionState('submitting')
     setSubmissionError('')
+    noteExerciseActivity()
 
     try {
       const result = await submitExercise({
@@ -606,6 +672,7 @@ function App() {
     recallUsedCount,
     refreshAppState,
     runCount,
+    noteExerciseActivity,
     submissionState,
   ])
 
@@ -618,6 +685,7 @@ function App() {
 
     setRecallState('loading')
     setRecallMessage('')
+    noteExerciseActivity()
 
     try {
       const response = await requestRecall({
@@ -632,7 +700,18 @@ function App() {
       setRecallState('error')
       setRecallMessage(error instanceof Error ? error.message : 'Recall request failed.')
     }
-  }, [code, getCurrentLineContext, recallInput, recallState])
+  }, [code, getCurrentLineContext, noteExerciseActivity, recallInput, recallState])
+
+  const handleIdleHintAsk = useCallback(async () => {
+    setHintVisible(false)
+    setHintHandled(true)
+    await sendHelperRequest('Give me one small hint for this exercise without solving it.')
+  }, [sendHelperRequest])
+
+  const handleIdleHintDismiss = useCallback(() => {
+    setHintVisible(false)
+    setHintHandled(true)
+  }, [])
 
   const handleExplainTask = useCallback(async () => {
     if (!currentExercise) {
@@ -814,11 +893,35 @@ function App() {
 
   useEffect(() => {
     if (recallOpen) {
+      positionRecallPopup()
       requestAnimationFrame(() => {
         recallInputRef.current?.focus()
       })
     }
-  }, [recallOpen])
+  }, [positionRecallPopup, recallOpen])
+
+  useEffect(() => {
+    if (!currentExercise || hintHandled || hintVisible || appView !== 'workspace') {
+      return
+    }
+
+    const lastSeen = lastInteractionAt ?? exerciseStartedAt ?? Date.now()
+    const elapsed = Date.now() - lastSeen
+    const remaining = IDLE_HINT_DELAY_MS - elapsed
+
+    if (remaining <= 0) {
+      setHintVisible(true)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setHintVisible(true)
+    }, remaining)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [appView, currentExercise, exerciseStartedAt, hintHandled, hintVisible, lastInteractionAt])
 
   useEffect(() => {
     if (!currentExercise || !lastRun || chatState === 'sending') {
@@ -865,7 +968,7 @@ function App() {
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <p className="eyebrow">Milestone 9</p>
+          <p className="eyebrow">Milestone 11</p>
           <h1>Skynet learning</h1>
         </div>
         <div className="header-actions">
@@ -987,114 +1090,130 @@ function App() {
           </section>
         </main>
       ) : (
-      <main className="workspace">
-        <aside className="side-panel">
-          <h2>Prompt</h2>
-          {exerciseState === 'ready' && currentExercise ? (
+        <main
+        className="workspace"
+        style={{
+          gridTemplateColumns: `${promptCollapsed ? '3.8rem' : 'minmax(14rem, 19%)'} minmax(36rem, 1fr) ${chatCollapsed ? '3.8rem' : 'minmax(15rem, 24%)'}`,
+        }}
+        >
+        <aside className={`side-panel ${promptCollapsed ? 'side-panel--collapsed' : ''}`}>
+          <div className="side-panel__header">
+            <h2>Prompt</h2>
+            <button className="ghost-button" onClick={() => setPromptCollapsed((value) => !value)}>
+              {promptCollapsed ? 'Open' : 'Collapse'}
+            </button>
+          </div>
+          {!promptCollapsed ? (
             <>
-              <div className="prompt-meta">
-                <span className="difficulty-chip">{currentExercise.difficultyBand}</span>
-                {currentExercise.topics.map((topic) => (
-                  <span key={topic.id} className="topic-chip">
-                    {topic.displayName}
-                  </span>
-                ))}
-              </div>
-              <article className="prompt-card">
-                <div className="prompt-markdown">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={markdownComponents}
-                  >
-                    {currentExercise.promptMd}
-                  </ReactMarkdown>
+              {exerciseState === 'ready' && currentExercise ? (
+                <>
+                  <div className="prompt-meta">
+                    <span className="difficulty-chip">{currentExercise.difficultyBand}</span>
+                    {currentExercise.topics.map((topic) => (
+                      <span key={topic.id} className="topic-chip">
+                        {topic.displayName}
+                      </span>
+                    ))}
+                  </div>
+                  <article className="prompt-card">
+                    <div className="prompt-markdown">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={markdownComponents}
+                      >
+                        {currentExercise.promptMd}
+                      </ReactMarkdown>
+                    </div>
+                  </article>
+                  <div className="prompt-actions">
+                    <button
+                      className="ghost-button"
+                      onClick={() => void handleExplainTask()}
+                      disabled={chatState === 'sending' || hintVisible}
+                    >
+                      {chatState === 'sending' ? 'Explaining...' : 'Explain'}
+                    </button>
+                    <button
+                      className="ghost-button"
+                      onClick={() => void handleSkip()}
+                      disabled={submissionState === 'submitting'}
+                    >
+                      Skip exercise
+                    </button>
+                    <button
+                      className="ghost-button"
+                      onClick={() => void loadNextExercise()}
+                      disabled={submissionState === 'submitting'}
+                    >
+                      Next exercise
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="panel-card">
+                  <p className={`status-copy status-copy--${exerciseState}`}>
+                    {exerciseState === 'loading' && exerciseLoadingMessage}
+                    {exerciseState === 'error' && exerciseError}
+                    {exerciseState === 'unconfigured' &&
+                      'Worker config is missing, so the editor stays in local sample mode.'}
+                  </p>
                 </div>
-              </article>
-              <div className="prompt-actions">
-                <button
-                  className="ghost-button"
-                  onClick={() => void handleExplainTask()}
-                  disabled={chatState === 'sending'}
-                >
-                  {chatState === 'sending' ? 'Explaining...' : 'Explain'}
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() => void handleSkip()}
-                  disabled={submissionState === 'submitting'}
-                >
-                  Skip exercise
-                </button>
-                <button
-                  className="ghost-button"
-                  onClick={() => void loadNextExercise()}
-                  disabled={submissionState === 'submitting'}
-                >
-                  Next exercise
-                </button>
+              )}
+
+              <div className="panel-card">
+                <h3>Current scope</h3>
+                <ul>
+                  <li>Generated exercises verified locally before display</li>
+                  <li>Difficulty band mixes with lower-band retention</li>
+                  <li>Weak-topic targeting with recent-topic variety</li>
+                  <li>Helper chat in the current exercise context</li>
+                  <li>Recall popup via Ctrl+K</li>
+                  <li>Automatic error explanation after failed runs</li>
+                </ul>
+              </div>
+
+              <div className="panel-card">
+                <h3>Backend state</h3>
+                <p className={`status-copy status-copy--${backendState}`}>
+                  {backendState === 'loading' && 'Loading /api/state...'}
+                  {backendState === 'ready' &&
+                    `Loaded ${appState?.competenceMap.length ?? 0} topic definitions and your current progress.`}
+                  {backendState === 'error' && backendError}
+                  {backendState === 'unconfigured' && backendError}
+                </p>
+                {appState ? (
+                  <dl className="state-grid">
+                    <div>
+                      <dt>Difficulty</dt>
+                      <dd>{appState.currentDifficultyBand}</dd>
+                    </div>
+                    <div>
+                      <dt>History</dt>
+                      <dd>{appState.recentHistory.length} attempts</dd>
+                    </div>
+                    <div>
+                      <dt>Topics</dt>
+                      <dd>{appState.competenceMap.length}</dd>
+                    </div>
+                  </dl>
+                ) : null}
+                {appState ? (
+                  <dl className="state-grid state-grid--spend">
+                    <div>
+                      <dt>Daily spend</dt>
+                      <dd>${appState.spend.dailyUsd.toFixed(4)}</dd>
+                    </div>
+                    <div>
+                      <dt>Monthly spend</dt>
+                      <dd>${appState.spend.monthlyUsd.toFixed(4)}</dd>
+                    </div>
+                  </dl>
+                ) : null}
               </div>
             </>
           ) : (
-            <div className="panel-card">
-              <p className={`status-copy status-copy--${exerciseState}`}>
-                {exerciseState === 'loading' && exerciseLoadingMessage}
-                {exerciseState === 'error' && exerciseError}
-                {exerciseState === 'unconfigured' &&
-                  'Worker config is missing, so the editor stays in local sample mode.'}
-              </p>
-            </div>
+            <div className="side-panel__collapsed-label">Prompt</div>
           )}
-
-          <div className="panel-card">
-            <h3>Current scope</h3>
-            <ul>
-              <li>Generated exercises verified locally before display</li>
-              <li>Difficulty band mixes with lower-band retention</li>
-              <li>Weak-topic targeting with recent-topic variety</li>
-              <li>Helper chat in the current exercise context</li>
-              <li>Recall popup via Ctrl+K</li>
-              <li>Automatic error explanation after failed runs</li>
-            </ul>
-          </div>
-
-          <div className="panel-card">
-            <h3>Backend state</h3>
-            <p className={`status-copy status-copy--${backendState}`}>
-              {backendState === 'loading' && 'Loading /api/state...'}
-              {backendState === 'ready' &&
-                `Loaded ${appState?.competenceMap.length ?? 0} topic definitions and your current progress.`}
-              {backendState === 'error' && backendError}
-              {backendState === 'unconfigured' && backendError}
-            </p>
-            {appState ? (
-              <dl className="state-grid">
-                <div>
-                  <dt>Difficulty</dt>
-                  <dd>{appState.currentDifficultyBand}</dd>
-                </div>
-                <div>
-                  <dt>History</dt>
-                  <dd>{appState.recentHistory.length} attempts</dd>
-                </div>
-                <div>
-                  <dt>Topics</dt>
-                  <dd>{appState.competenceMap.length}</dd>
-                </div>
-              </dl>
-            ) : null}
-            {appState ? (
-              <dl className="state-grid state-grid--spend">
-                <div>
-                  <dt>Daily spend</dt>
-                  <dd>${appState.spend.dailyUsd.toFixed(4)}</dd>
-                </div>
-                <div>
-                  <dt>Monthly spend</dt>
-                  <dd>${appState.spend.monthlyUsd.toFixed(4)}</dd>
-                </div>
-              </dl>
-            ) : null}
-          </div>
         </aside>
 
         <section className="editor-panel">
@@ -1120,7 +1239,7 @@ function App() {
             </div>
           </div>
 
-          <div className="editor-frame">
+          <div className="editor-frame" ref={editorFrameRef}>
             <CodeMirror
               value={code}
               height="100%"
@@ -1133,7 +1252,7 @@ function App() {
                 highlightActiveLineGutter: true,
                 closeBrackets: true,
               }}
-              onChange={setCode}
+              onChange={handleCodeChange}
               onCreateEditor={(view) => {
                 editorViewRef.current = view
               }}
@@ -1141,7 +1260,12 @@ function App() {
           </div>
 
           {recallOpen ? (
-            <div className="recall-popup" role="dialog" aria-label="Syntax recall">
+            <div
+              className="recall-popup"
+              role="dialog"
+              aria-label="Syntax recall"
+              style={recallAnchor ? { top: recallAnchor.top, left: recallAnchor.left } : undefined}
+            >
               <div className="recall-popup__header">
                 <h3>Syntax Recall</h3>
                 <button className="ghost-button" onClick={() => setRecallOpen(false)}>
@@ -1197,9 +1321,12 @@ function App() {
             </p>
           )}
 
-          <section className="output-panel" aria-live="polite">
+          <section className={`output-panel ${outputCollapsed ? 'output-panel--collapsed' : ''}`} aria-live="polite">
             <div className="output-header">
               <h2>Output</h2>
+              <button className="ghost-button" onClick={() => setOutputCollapsed((value) => !value)}>
+                {outputCollapsed ? 'Expand' : 'Collapse'}
+              </button>
               {lastRun ? (
                 <span
                   className={`run-status run-status--${
@@ -1217,116 +1344,146 @@ function App() {
               ) : null}
             </div>
 
-            {runtimeState === 'error' ? (
-              <pre className="output-block output-block--error">{runtimeError}</pre>
-            ) : null}
+            {!outputCollapsed ? (
+                <>
+                  {runtimeState === 'error' ? (
+                    <pre className="output-block output-block--error">{runtimeError}</pre>
+                  ) : null}
 
-            {!lastRun && runtimeState !== 'error' ? (
-              <p className="output-placeholder">
-                {currentExercise
-                  ? 'Run the exercise to see stdout, stderr, and per-test results here.'
-                  : 'Run the sample code to see stdout and Python tracebacks here.'}
-              </p>
-            ) : null}
+                  {!lastRun && runtimeState !== 'error' ? (
+                    <p className="output-placeholder">
+                      {currentExercise
+                        ? 'Run the exercise to see stdout, stderr, and per-test results here.'
+                        : 'Run the sample code to see stdout and Python tracebacks here.'}
+                    </p>
+                  ) : null}
 
-            {lastRun?.tests.length ? (
-              <div className="output-section">
-                <h3>tests</h3>
-                <div className="test-list">
-                  {lastRun.tests.map((test) => (
-                    <div key={test.name} className={`test-item test-item--${test.status}`}>
-                      <div className="test-item__header">
-                        <span>{test.name}</span>
-                        <span>{test.status}</span>
+                  {lastRun?.tests.length ? (
+                    <div className="output-section">
+                      <h3>tests</h3>
+                      <div className="test-list">
+                        {lastRun.tests.map((test) => (
+                          <div key={test.name} className={`test-item test-item--${test.status}`}>
+                            <div className="test-item__header">
+                              <span>{test.name}</span>
+                              <span>{test.status}</span>
+                            </div>
+                            {test.message ? <pre className="output-block">{test.message}</pre> : null}
+                          </div>
+                        ))}
                       </div>
-                      {test.message ? <pre className="output-block">{test.message}</pre> : null}
                     </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
+                  ) : null}
 
-            {lastRun?.stdout ? (
-              <div className="output-section">
-                <h3>stdout</h3>
-                <pre className="output-block">{lastRun.stdout}</pre>
-              </div>
-            ) : null}
+                  {lastRun?.stdout ? (
+                    <div className="output-section">
+                      <h3>stdout</h3>
+                      <pre className="output-block">{lastRun.stdout}</pre>
+                    </div>
+                  ) : null}
 
-            {lastRun?.stderr ? (
-              <div className="output-section">
-                <h3>stderr</h3>
-                <pre className="output-block output-block--error">{lastRun.stderr}</pre>
-              </div>
-            ) : null}
+                  {lastRun?.stderr ? (
+                    <div className="output-section">
+                      <h3>stderr</h3>
+                      <pre className="output-block output-block--error">{lastRun.stderr}</pre>
+                    </div>
+                  ) : null}
 
-            {failedTests.length > 0 ? (
-              <p className="editor-note editor-note--error">
-                {failedTests.length} {pluralize(failedTests.length, 'test is', 'tests are')} still
-                failing.
-              </p>
-            ) : null}
+                  {failedTests.length > 0 ? (
+                    <p className="editor-note editor-note--error">
+                      {failedTests.length} {pluralize(failedTests.length, 'test is', 'tests are')} still
+                      failing.
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
           </section>
         </section>
 
-        <aside className="side-panel side-panel--chat">
-          <div className="chat-header">
-            <div>
-              <h2>AI Chat</h2>
-              <p>Helper chat resets when you move to a new exercise.</p>
-            </div>
-            <div className="chat-meta">
-              <span className="run-counter">
-                {chatUsedCount} {pluralize(chatUsedCount, 'chat', 'chats')}
-              </span>
-              <span className="run-counter">
-                {recallUsedCount} {pluralize(recallUsedCount, 'recall', 'recalls')}
-              </span>
-            </div>
-          </div>
-
-          <div className="chat-thread">
-            {chatMessages.length === 0 ? (
-              <div className="panel-card">
-                <p className="status-copy">
-                  Ask for a hint, explanation, or error help. Failed runs will also auto-trigger a
-                  short explanation here.
-                </p>
+        <aside className={`side-panel side-panel--chat ${chatCollapsed ? 'side-panel--collapsed' : ''}`}>
+          <div className="side-panel__header">
+            <div className="chat-header">
+              <div>
+                <h2>AI Chat</h2>
+                <p>Helper chat resets when you move to a new exercise.</p>
               </div>
-            ) : (
-              chatMessages.map((entry, index) => (
-                <div key={`${entry.role}-${index}`} className={`chat-message chat-message--${entry.role}`}>
-                  <div className="chat-message__role">{entry.role === 'user' ? 'You' : 'AI'}</div>
-                  <div className="chat-message__content markdown-content">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {entry.content}
-                    </ReactMarkdown>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
-          {submissionError ? <p className="editor-note editor-note--error">{submissionError}</p> : null}
-          {chatError ? <p className="editor-note editor-note--error">{chatError}</p> : null}
-
-          <div className="chat-composer">
-            <textarea
-              ref={chatInputRef}
-              className="chat-input"
-              value={chatInput}
-              onChange={(event) => setChatInput(event.target.value)}
-              placeholder="Ask for a hint, explanation, or approach..."
-              rows={4}
-            />
-            <button
-              className="primary-button"
-              onClick={() => void sendHelperRequest(chatInput)}
-              disabled={!currentExercise || chatState === 'sending' || !chatInput.trim()}
-            >
-              {chatState === 'sending' ? 'Sending...' : 'Send'}
+              <div className="chat-meta">
+                <span className="run-counter">
+                  {chatUsedCount} {pluralize(chatUsedCount, 'chat', 'chats')}
+                </span>
+                <span className="run-counter">
+                  {recallUsedCount} {pluralize(recallUsedCount, 'recall', 'recalls')}
+                </span>
+              </div>
+            </div>
+            <button className="ghost-button" onClick={() => setChatCollapsed((value) => !value)}>
+              {chatCollapsed ? 'Open' : 'Collapse'}
             </button>
           </div>
+
+          {!chatCollapsed ? (
+            <>
+
+              {hintVisible ? (
+                <div className="hint-pill">
+                  <span>Want a hint?</span>
+                  <div className="hint-pill__actions">
+                    <button className="ghost-button" onClick={() => void handleIdleHintAsk()}>
+                      Ask
+                    </button>
+                    <button className="ghost-button" onClick={handleIdleHintDismiss}>
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="chat-thread">
+                {chatMessages.length === 0 ? (
+                  <div className="panel-card">
+                    <p className="status-copy">
+                      Ask for a hint, explanation, or error help. Failed runs will also auto-trigger a
+                      short explanation here.
+                    </p>
+                  </div>
+                ) : (
+                  chatMessages.map((entry, index) => (
+                    <div key={`${entry.role}-${index}`} className={`chat-message chat-message--${entry.role}`}>
+                      <div className="chat-message__role">{entry.role === 'user' ? 'You' : 'AI'}</div>
+                      <div className="chat-message__content markdown-content">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                          {entry.content}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {submissionError ? <p className="editor-note editor-note--error">{submissionError}</p> : null}
+              {chatError ? <p className="editor-note editor-note--error">{chatError}</p> : null}
+
+              <div className="chat-composer">
+                <textarea
+                  ref={chatInputRef}
+                  className="chat-input"
+                  value={chatInput}
+                  onChange={(event) => setChatInput(event.target.value)}
+                  placeholder="Ask for a hint, explanation, or approach..."
+                  rows={4}
+                />
+                <button
+                  className="primary-button"
+                  onClick={() => void sendHelperRequest(chatInput)}
+                  disabled={!currentExercise || chatState === 'sending' || !chatInput.trim()}
+                >
+                  {chatState === 'sending' ? 'Sending...' : 'Send'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="side-panel__collapsed-label">Chat</div>
+          )}
         </aside>
       </main>
       )}

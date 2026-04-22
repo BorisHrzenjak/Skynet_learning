@@ -301,6 +301,35 @@
   min-height: 0;
 }
 
+.side-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.side-panel--collapsed {
+  padding: 0.75rem 0.5rem;
+  align-items: center;
+  overflow: hidden;
+}
+
+.side-panel--collapsed .side-panel__header {
+  flex-direction: column;
+  align-items: center;
+}
+
+.side-panel__collapsed-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
 /* ── Inner Cards ────────────────────────────────────────── */
 .panel-card {
   border-radius: 9px;
@@ -629,8 +658,6 @@
 /* ── Recall Popup ───────────────────────────────────────── */
 .recall-popup {
   position: absolute;
-  right: 1.5rem;
-  top: 5rem;
   z-index: 10;
   width: min(27rem, calc(100% - 3rem));
   border: 1px solid var(--border-strong);
@@ -749,6 +776,24 @@
   flex-shrink: 0;
 }
 
+.hint-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid rgba(74, 144, 184, 0.28);
+  border-radius: 999px;
+  padding: 0.45rem 0.7rem;
+  background: rgba(74, 144, 184, 0.08);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
+.hint-pill__actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
 /* ── Output Panel ───────────────────────────────────────── */
 .output-panel {
   border-radius: 9px;
@@ -756,6 +801,10 @@
   background: var(--panel-muted);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
+}
+
+.output-panel--collapsed {
+  padding-bottom: 0.75rem;
 }
 
 .output-header {

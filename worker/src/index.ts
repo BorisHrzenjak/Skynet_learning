@@ -73,6 +73,10 @@ type ExerciseTopicLinkRow = {
   display_name: string
 }
 
+type PromptRow = {
+  prompt_md: string
+}
+
 type ExerciseTopicSummary = {
   id: string
   displayName: string
@@ -319,6 +323,44 @@ function stripCodeFences(value: string) {
   }
 
   return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+}
+
+function summarizePrompt(promptMd: string) {
+  return promptMd
+    .replace(/[#>*`|_-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180)
+}
+
+function validateGeneratedExercisePayload(payload: {
+  prompt_md: string
+  starter_code: string
+  reference_solution: string
+  tests: string
+}) {
+  const required = [payload.prompt_md, payload.starter_code, payload.reference_solution, payload.tests]
+
+  if (required.some((value) => typeof value !== 'string' || !value.trim())) {
+    throw new Error('Generated exercise payload is missing required fields.')
+  }
+
+  if (!/from\s+solution\s+import/m.test(payload.tests)) {
+    throw new Error('Generated tests must import from solution.')
+  }
+
+  if (!/def\s+test_/m.test(payload.tests)) {
+    throw new Error('Generated tests must define at least one test_ function.')
+  }
+
+  if (/\bpytest\b/.test(payload.tests)) {
+    throw new Error('Generated tests must not depend on pytest.')
+  }
+
+  const forbidden = /(subprocess|os\.system|requests|urllib|socket|tkinter)/
+  if (forbidden.test(payload.reference_solution) || forbidden.test(payload.tests)) {
+    throw new Error('Generated exercise used forbidden libraries or APIs.')
+  }
 }
 
 function toPublicExercise(exercise: ExerciseRecord) {
@@ -678,6 +720,19 @@ async function getCachedExercise(
   return getExerciseRecord(env, row.id)
 }
 
+async function getRecentExerciseSummaries(env: Env) {
+  const recentPromptResults = await env.DB.prepare(
+    `
+      SELECT prompt_md
+      FROM exercises
+      ORDER BY created_at DESC
+      LIMIT 5
+    `,
+  ).all<PromptRow>()
+
+  return (recentPromptResults.results ?? []).map((row) => summarizePrompt(row.prompt_md))
+}
+
 async function getHardcodedFallbackExercise(env: Env) {
   const row = await env.DB.prepare(
     `
@@ -700,7 +755,11 @@ async function getHardcodedFallbackExercise(env: Env) {
   return getExerciseRecord(env, row.id)
 }
 
-function buildGeneratorUserMessage(topic: ExerciseTopicSummary, difficultyBand: DifficultyBand) {
+function buildGeneratorUserMessage(
+  topic: ExerciseTopicSummary,
+  difficultyBand: DifficultyBand,
+  recentSummaries: string[],
+) {
   return [
     `Target topic: ${topic.displayName} (${topic.id})`,
     `Target difficulty band: ${difficultyBand}`,
@@ -713,6 +772,10 @@ function buildGeneratorUserMessage(topic: ExerciseTopicSummary, difficultyBand: 
     '- Keep the exercise self-contained and short',
     '- Tests must import from solution',
     '- Tests must use plain Python test_ functions and assert statements',
+    '- Make the prompt easy to scan for a learner',
+    '',
+    'Avoid repeating these recent exercise shapes:',
+    ...recentSummaries.map((summary, index) => `${index + 1}. ${summary}`),
     '',
     'Return JSON only.',
   ].join('\n')
@@ -724,37 +787,45 @@ async function generateExerciseCandidate(
   topic: ExerciseTopicSummary,
   difficultyBand: DifficultyBand,
 ) {
-  const content = await runModelCall({
-    env,
-    settings,
-    model: settings.models.generator ?? MODELS.generator,
-    temperature: 0.5,
-    maxTokens: 900,
-    messages: [
-      { role: 'system', content: GENERATOR_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: buildGeneratorUserMessage(topic, difficultyBand),
-      },
-    ],
-  })
+  const recentSummaries = await getRecentExerciseSummaries(env)
 
-  const payload = JSON.parse(stripCodeFences(content)) as {
-    prompt_md: string
-    starter_code: string
-    reference_solution: string
-    tests: string
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const content = await runModelCall({
+      env,
+      settings,
+      model: settings.models.generator ?? MODELS.generator,
+      temperature: 0.5,
+      maxTokens: 900,
+      messages: [
+        { role: 'system', content: GENERATOR_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: buildGeneratorUserMessage(topic, difficultyBand, recentSummaries),
+        },
+      ],
+    })
+
+    const payload = JSON.parse(stripCodeFences(content)) as {
+      prompt_md: string
+      starter_code: string
+      reference_solution: string
+      tests: string
+    }
+
+    validateGeneratedExercisePayload(payload)
+
+    return {
+      id: crypto.randomUUID(),
+      promptMd: payload.prompt_md,
+      starterCode: payload.starter_code ?? '',
+      referenceSolution: payload.reference_solution,
+      tests: payload.tests,
+      difficultyBand,
+      topics: [topic],
+    } satisfies GeneratedExerciseCandidate
   }
 
-  return {
-    id: crypto.randomUUID(),
-    promptMd: payload.prompt_md,
-    starterCode: payload.starter_code ?? '',
-    referenceSolution: payload.reference_solution,
-    tests: payload.tests,
-    difficultyBand,
-    topics: [topic],
-  } satisfies GeneratedExerciseCandidate
+  throw new Error('Generator did not produce a valid exercise after retries.')
 }
 
 async function persistPendingExercise(env: Env, candidate: GeneratedExerciseCandidate) {
