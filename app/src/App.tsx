@@ -1106,7 +1106,7 @@ function App() {
         <main
         className="workspace"
         style={{
-          gridTemplateColumns: `${promptCollapsed ? '3.8rem' : 'minmax(14rem, 19%)'} minmax(36rem, 1fr) ${chatCollapsed ? '3.8rem' : 'minmax(15rem, 24%)'}`,
+          gridTemplateColumns: `${promptCollapsed ? '3.8rem' : 'minmax(18rem, 24%)'} minmax(34rem, 1fr) ${chatCollapsed ? '3.8rem' : 'minmax(15rem, 22%)'}`,
         }}
         >
         <aside className={`side-panel ${promptCollapsed ? 'side-panel--collapsed' : ''}`}>
@@ -1172,18 +1172,6 @@ function App() {
                   </p>
                 </div>
               )}
-
-              <div className="panel-card">
-                <h3>Current scope</h3>
-                <ul>
-                  <li>Generated exercises verified locally before display</li>
-                  <li>Difficulty band mixes with lower-band retention</li>
-                  <li>Weak-topic targeting with recent-topic variety</li>
-                  <li>Helper chat in the current exercise context</li>
-                  <li>Recall popup via Ctrl+K</li>
-                  <li>Automatic error explanation after failed runs</li>
-                </ul>
-              </div>
 
               <div className="panel-card">
                 <h3>Backend state</h3>

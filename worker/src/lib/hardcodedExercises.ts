@@ -20,11 +20,30 @@ export const HARDCODED_EXERCISES: HardcodedExercise[] = [
 
 Write a function named \`describe_numbers(values)\`.
 
-- It should take a list of integers.
-- Return a new list of strings.
-- Each string should look like \`"4 is even"\` or \`"5 is odd"\`.
+## What goes in
 
-Do not print inside the function. Return the list instead.`,
+- \`values\` will be a list of integers.
+
+## What should come out
+
+- Return a **new list of strings**.
+- Each string should describe one number.
+- For an even number, the string should look like \`"4 is even"\`.
+- For an odd number, the string should look like \`"5 is odd"\`.
+
+## Rules
+
+- Keep the numbers in the same order they appear in the input list.
+- If the input list is empty, return an empty list.
+- Do **not** print anything inside the function.
+
+## Example
+
+\`describe_numbers([1, 2, 5])\` should return:
+
+\`["1 is odd", "2 is even", "5 is odd"]\`
+
+Return the list instead of printing it.`,
     starterCode: `def describe_numbers(values):
     # return a list like ["1 is odd", "2 is even"]
     pass
@@ -62,10 +81,23 @@ def test_mixed_values():
 
 Write a function named \`count_words(words)\`.
 
-- \`words\` will be a list of lowercase strings.
-- Return a dictionary mapping each word to how many times it appears.
+## What goes in
 
-Example:
+- \`words\` will be a list of lowercase strings.
+
+## What should come out
+
+- Return a dictionary.
+- Each key should be a word from the input list.
+- Each value should be how many times that word appears.
+
+## Rules
+
+- If a word appears more than once, increase its count.
+- If the input list is empty, return an empty dictionary.
+- You do not need to sort anything.
+
+## Example
 
 \`count_words(["red", "blue", "red"])\` should return \`{"red": 2, "blue": 1}\`.`,
     starterCode: `def count_words(words):
@@ -103,11 +135,30 @@ def test_repeated_words():
 
 Write a function named \`fizzbuzz_values(limit)\`.
 
-- Return a list of values from 1 through \`limit\`.
-- For multiples of 3, use \`"Fizz"\`.
-- For multiples of 5, use \`"Buzz"\`.
-- For multiples of both 3 and 5, use \`"FizzBuzz"\`.
-- For all other numbers, keep the number itself.
+## What goes in
+
+- \`limit\` will be a positive integer.
+
+## What should come out
+
+- Return a list of values from **1 through \`limit\`**.
+
+## Rules
+
+- If a number is divisible by 3, use \`"Fizz"\` instead of the number.
+- If a number is divisible by 5, use \`"Buzz"\` instead of the number.
+- If a number is divisible by **both** 3 and 5, use \`"FizzBuzz"\`.
+- Otherwise, keep the number itself.
+
+## Important detail
+
+- Check the **both 3 and 5** case before the separate 3-only or 5-only cases.
+
+## Example
+
+\`fizzbuzz_values(5)\` should return:
+
+\`[1, 2, "Fizz", 4, "Buzz"]\`
 `,
     starterCode: `def fizzbuzz_values(limit):
     result = []
