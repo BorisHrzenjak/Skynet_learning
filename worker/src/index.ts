@@ -708,6 +708,7 @@ async function getCachedExercise(
       INNER JOIN exercise_topics ON exercise_topics.exercise_id = exercises.id
       WHERE exercise_topics.topic_id = ?
         AND exercises.difficulty_band = ?
+        AND exercises.hash NOT LIKE 'mbpp:%'
         AND exercises.hash NOT LIKE 'pending:%'
         AND NOT EXISTS (
           SELECT 1
@@ -717,11 +718,42 @@ async function getCachedExercise(
         )
       ORDER BY
         CASE
-          WHEN exercises.hash LIKE 'mbpp:%' THEN 0
-          WHEN exercises.hash LIKE 'hardcoded:%' THEN 2
-          ELSE 1
+          WHEN exercises.hash LIKE 'hardcoded:%' THEN 1
+          ELSE 0
         END,
         RANDOM()
+      LIMIT 1
+    `,
+  ).bind(topicId, difficultyBand, cutoff).first<{ id: string }>()
+
+  if (!row) {
+    return null
+  }
+
+  return getExerciseRecord(env, row.id)
+}
+
+async function getImportedExercise(
+  env: Env,
+  topicId: string,
+  difficultyBand: DifficultyBand,
+) {
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  const row = await env.DB.prepare(
+    `
+      SELECT exercises.id
+      FROM exercises
+      INNER JOIN exercise_topics ON exercise_topics.exercise_id = exercises.id
+      WHERE exercise_topics.topic_id = ?
+        AND exercises.difficulty_band = ?
+        AND exercises.hash LIKE 'mbpp:%'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM attempts
+          WHERE attempts.exercise_id = exercises.id
+            AND attempts.created_at >= ?
+        )
+      ORDER BY RANDOM()
       LIMIT 1
     `,
   ).bind(topicId, difficultyBand, cutoff).first<{ id: string }>()
@@ -965,7 +997,8 @@ async function handleNextExercise(request: Request, env: Env) {
   const state = await getStatePayload(env)
   const difficultyBand = pickWeightedBand(state.currentDifficultyBand)
   const topic = await chooseTargetTopic(env, settings, difficultyBand)
-  const importedFallback = await getImportedFallbackExercise(env)
+  const importedExercise = topic ? await getImportedExercise(env, topic.id, difficultyBand) : null
+  const importedFallback = importedExercise ? null : await getImportedFallbackExercise(env)
   const hardcodedFallback = await getHardcodedFallbackExercise(env)
 
   if (!topic) {
@@ -978,6 +1011,10 @@ async function handleNextExercise(request: Request, env: Env) {
     }
 
     return json({ error: 'No topic is available for the next exercise.' }, 500)
+  }
+
+  if (importedExercise) {
+    return json({ mode: 'ready', exercise: toPublicExercise(importedExercise) })
   }
 
   const shouldServeCache = Math.random() < 0.7 || !env.OPENROUTER_API_KEY
