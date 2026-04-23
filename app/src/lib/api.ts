@@ -76,6 +76,10 @@ export type AppSettings = {
   models: Record<string, string>
   preferredTopics: string[]
   unlockThresholds: Record<string, number>
+  openrouter: {
+    apiKeyConfigured: boolean
+    apiKeySource: 'settings' | 'env' | 'none'
+  }
 }
 
 export type RecentAttempt = {
@@ -114,6 +118,8 @@ export type SettingsUpdate = {
   modelOverrides: Record<string, string>
   preferredTopics: string[]
   unlockThresholds: Record<string, number>
+  openrouterApiKey?: string
+  clearOpenrouterApiKey?: boolean
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit) {

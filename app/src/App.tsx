@@ -67,6 +67,8 @@ type SettingsDraft = {
   costCapMonthlyUsd: string
   modelOverrides: Record<string, string>
   preferredTopics: string[]
+  openrouterApiKey: string
+  clearOpenrouterApiKey: boolean
   unlockThresholds: {
     intermediate: string
     advanced: string
@@ -193,6 +195,8 @@ function buildSettingsDraft(appState: AppState): SettingsDraft {
       recall: appState.settings.models.recall,
     },
     preferredTopics: appState.settings.preferredTopics,
+    openrouterApiKey: '',
+    clearOpenrouterApiKey: false,
     unlockThresholds: {
       intermediate: String(appState.settings.unlockThresholds.intermediate ?? 0.8),
       advanced: String(appState.settings.unlockThresholds.advanced ?? 0.85),
@@ -804,6 +808,8 @@ function App() {
         costCapMonthlyUsd: parseNullableNumber(settingsDraft.costCapMonthlyUsd),
         modelOverrides: settingsDraft.modelOverrides,
         preferredTopics: settingsDraft.preferredTopics,
+        openrouterApiKey: settingsDraft.openrouterApiKey.trim() || undefined,
+        clearOpenrouterApiKey: settingsDraft.clearOpenrouterApiKey,
         unlockThresholds: {
           intermediate: parseNullableNumber(settingsDraft.unlockThresholds.intermediate) ?? 0.8,
           advanced: parseNullableNumber(settingsDraft.unlockThresholds.advanced) ?? 0.85,
@@ -1627,7 +1633,7 @@ function App() {
             <div className="settings-modal__header">
               <div>
                 <h2>Settings</h2>
-                <p>Edit caps, models, topic preferences, and unlock thresholds.</p>
+                <p>Edit caps, models, topic preferences, unlock thresholds, and the server-side OpenRouter key.</p>
               </div>
               <button className="ghost-button" onClick={() => setSettingsOpen(false)}>
                 Close
@@ -1635,6 +1641,32 @@ function App() {
             </div>
 
             <div className="settings-grid">
+              <label className="settings-field">
+                <span>OpenRouter API key</span>
+                <input
+                  className="chat-input chat-input--single"
+                  type="password"
+                  autoComplete="off"
+                  value={settingsDraft.openrouterApiKey}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            openrouterApiKey: event.target.value,
+                            clearOpenrouterApiKey: false,
+                          }
+                        : prev,
+                    )
+                  }
+                  placeholder={
+                    appState?.settings.openrouter.apiKeyConfigured
+                      ? 'Leave empty to keep the existing key'
+                      : 'Paste a new OpenRouter key'
+                  }
+                />
+              </label>
+
               <label className="settings-field">
                 <span>Daily cap (USD)</span>
                 <input
@@ -1728,6 +1760,33 @@ function App() {
                 />
               </label>
             </div>
+
+            <p className="editor-note">
+              OpenRouter status:{' '}
+              {appState?.settings.openrouter.apiKeyConfigured
+                ? `configured via ${appState.settings.openrouter.apiKeySource === 'settings' ? 'settings storage' : 'worker environment'}`
+                : 'not configured'}
+            </p>
+
+            <label className="settings-topic-option settings-topic-option--toggle">
+              <input
+                type="checkbox"
+                checked={settingsDraft.clearOpenrouterApiKey}
+                disabled={appState?.settings.openrouter.apiKeySource !== 'settings'}
+                onChange={(event) =>
+                  setSettingsDraft((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          clearOpenrouterApiKey: event.target.checked,
+                          openrouterApiKey: event.target.checked ? '' : prev.openrouterApiKey,
+                        }
+                      : prev,
+                  )
+                }
+              />
+              <span>Clear the key saved in settings</span>
+            </label>
 
             <label className="settings-topic-option settings-topic-option--toggle">
               <input

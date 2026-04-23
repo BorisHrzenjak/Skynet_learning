@@ -54,6 +54,11 @@ type SettingsRow = {
   models_json: string
   preferred_topics_json: string | null
   unlock_thresholds_json: string
+  openrouter_api_key: string | null
+}
+
+type OpenRouterKeyRow = {
+  openrouter_api_key: string | null
 }
 
 type ScoreRow = {
@@ -100,6 +105,10 @@ type EffectiveSettings = {
   models: Record<string, string>
   preferredTopics: string[]
   unlockThresholds: Record<string, number>
+  openrouter: {
+    apiKeyConfigured: boolean
+    apiKeySource: 'settings' | 'env' | 'none'
+  }
 }
 
 type DifficultyMixEntry = {
@@ -147,6 +156,8 @@ type SettingsUpdateRequest = {
   modelOverrides: Record<string, string>
   preferredTopics: string[]
   unlockThresholds: Record<string, number>
+  openrouterApiKey?: string
+  clearOpenrouterApiKey?: boolean
 }
 
 type GeneratedExerciseCandidate = {
@@ -196,6 +207,11 @@ function parseJson<T>(value: string | null, fallback: T) {
   } catch {
     return fallback
   }
+}
+
+function normalizeSecret(value: string | null | undefined) {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
 }
 
 function averageScore(rows: TopicRow[], band: DifficultyBand) {
@@ -427,7 +443,8 @@ async function getEffectiveSettings(env: Env): Promise<EffectiveSettings> {
         cost_cap_monthly_usd,
         models_json,
         preferred_topics_json,
-        unlock_thresholds_json
+        unlock_thresholds_json,
+        openrouter_api_key
       FROM settings
       WHERE id = 1
     `,
@@ -438,6 +455,13 @@ async function getEffectiveSettings(env: Env): Promise<EffectiveSettings> {
     settingsRow?.unlock_thresholds_json ?? null,
     { ...DEFAULT_UNLOCK_THRESHOLDS },
   )
+  const storedOpenRouterKey = normalizeSecret(settingsRow?.openrouter_api_key ?? null)
+  const envOpenRouterKey = normalizeSecret(env.OPENROUTER_API_KEY)
+  const openrouterApiKeySource = storedOpenRouterKey
+    ? 'settings'
+    : envOpenRouterKey
+      ? 'env'
+      : 'none'
 
   return {
     costCapDailyUsd: settingsRow?.cost_cap_daily_usd ?? null,
@@ -449,6 +473,31 @@ async function getEffectiveSettings(env: Env): Promise<EffectiveSettings> {
     },
     preferredTopics: parseJson<string[]>(settingsRow?.preferred_topics_json ?? null, []),
     unlockThresholds,
+    openrouter: {
+      apiKeyConfigured: openrouterApiKeySource !== 'none',
+      apiKeySource: openrouterApiKeySource,
+    },
+  }
+}
+
+async function getOpenRouterConfig(env: Env) {
+  const settingsRow = await env.DB.prepare(
+    `
+      SELECT openrouter_api_key
+      FROM settings
+      WHERE id = 1
+    `,
+  ).first<OpenRouterKeyRow>()
+
+  const storedOpenRouterKey = normalizeSecret(settingsRow?.openrouter_api_key ?? null)
+  const envOpenRouterKey = normalizeSecret(env.OPENROUTER_API_KEY)
+
+  return {
+    apiKey: storedOpenRouterKey ?? envOpenRouterKey,
+    apiKeySource: storedOpenRouterKey ? 'settings' : envOpenRouterKey ? 'env' : 'none',
+    baseUrl: env.OPENROUTER_BASE_URL,
+    referer: env.OPENROUTER_HTTP_REFERER,
+    title: env.OPENROUTER_APP_TITLE ?? 'Skynet learning',
   }
 }
 
@@ -592,7 +641,9 @@ async function runModelCall(options: {
   temperature?: number
   maxTokens?: number
 }) {
-  if (!options.env.OPENROUTER_API_KEY) {
+  const openRouter = await getOpenRouterConfig(options.env)
+
+  if (!openRouter.apiKey) {
     throw new Error('OpenRouter is not configured on the worker.')
   }
 
@@ -610,11 +661,11 @@ async function runModelCall(options: {
   }
 
   const result = await createChatCompletion({
-    apiKey: options.env.OPENROUTER_API_KEY,
+    apiKey: openRouter.apiKey,
     model: options.model,
-    baseUrl: options.env.OPENROUTER_BASE_URL,
-    referer: options.env.OPENROUTER_HTTP_REFERER,
-    title: options.env.OPENROUTER_APP_TITLE ?? 'Skynet learning',
+    baseUrl: openRouter.baseUrl,
+    referer: openRouter.referer,
+    title: openRouter.title,
     temperature: options.temperature,
     maxTokens: options.maxTokens,
     messages: options.messages,
@@ -994,6 +1045,7 @@ async function handleNextExercise(request: Request, env: Env) {
   }
 
   const settings = await getEffectiveSettings(env)
+  const openRouter = await getOpenRouterConfig(env)
   const state = await getStatePayload(env)
   const difficultyBand = pickWeightedBand(state.currentDifficultyBand)
   const topic = await chooseTargetTopic(env, settings, difficultyBand)
@@ -1017,7 +1069,7 @@ async function handleNextExercise(request: Request, env: Env) {
     return json({ mode: 'ready', exercise: toPublicExercise(importedExercise) })
   }
 
-  const shouldServeCache = Math.random() < 0.7 || !env.OPENROUTER_API_KEY
+  const shouldServeCache = Math.random() < 0.7 || !openRouter.apiKey
   const cachedExercise = await getCachedExercise(env, topic.id, difficultyBand)
 
   if (cachedExercise && shouldServeCache) {
@@ -1032,7 +1084,7 @@ async function handleNextExercise(request: Request, env: Env) {
     return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
   }
 
-  if (env.OPENROUTER_API_KEY) {
+  if (openRouter.apiKey) {
     try {
       const candidate = await generateExerciseCandidate(env, settings, topic, difficultyBand)
 
@@ -1155,7 +1207,9 @@ async function getExaminerReview(options: {
   payload: ExerciseSubmissionRequest
   perAttemptScore: number
 }) {
-  if (options.payload.abandoned || !options.env.OPENROUTER_API_KEY) {
+  const openRouter = await getOpenRouterConfig(options.env)
+
+  if (options.payload.abandoned || !openRouter.apiKey) {
     return buildSubmissionReview(options.payload, options.perAttemptScore)
   }
 
@@ -1381,12 +1435,13 @@ async function handleChat(request: Request, env: Env) {
 
   const effectiveSettings = await getEffectiveSettings(env)
   const exercise = payload.exerciseId ? await getExerciseRecord(env, payload.exerciseId) : null
+  const openRouter = await getOpenRouterConfig(env)
 
   if (!exercise) {
     return json({ error: 'Unknown exercise id for helper chat.' }, 400)
   }
 
-  if (!env.OPENROUTER_API_KEY) {
+  if (!openRouter.apiKey) {
     return json({
       message: buildFallbackHelperMessage({
         promptMd: exercise.promptMd,
@@ -1436,8 +1491,9 @@ async function handleRecall(request: Request, env: Env) {
   const payload = (await request.json()) as RecallRequest
 
   const effectiveSettings = await getEffectiveSettings(env)
+  const openRouter = await getOpenRouterConfig(env)
 
-  if (!env.OPENROUTER_API_KEY) {
+  if (!openRouter.apiKey) {
     return json({
       message: buildFallbackRecallMessage(payload.hint),
     })
@@ -1468,6 +1524,8 @@ async function handleSettings(request: Request, env: Env) {
   const modelOverrides = payload.modelOverrides ?? {}
   const preferredTopics = Array.isArray(payload.preferredTopics) ? payload.preferredTopics : []
   const unlockThresholds = payload.unlockThresholds ?? { ...DEFAULT_UNLOCK_THRESHOLDS }
+  const openrouterApiKey = normalizeSecret(payload.openrouterApiKey)
+  const clearOpenrouterApiKey = payload.clearOpenrouterApiKey === true
 
   await env.DB.prepare(
     `
@@ -1477,7 +1535,12 @@ async function handleSettings(request: Request, env: Env) {
         cost_cap_monthly_usd = ?,
         models_json = ?,
         preferred_topics_json = ?,
-        unlock_thresholds_json = ?
+        unlock_thresholds_json = ?,
+        openrouter_api_key = CASE
+          WHEN ? = 1 THEN NULL
+          WHEN ? IS NOT NULL THEN ?
+          ELSE openrouter_api_key
+        END
       WHERE id = 1
     `,
   ).bind(
@@ -1486,6 +1549,9 @@ async function handleSettings(request: Request, env: Env) {
     JSON.stringify(modelOverrides),
     preferredTopics.length ? JSON.stringify(preferredTopics) : null,
     JSON.stringify(unlockThresholds),
+    clearOpenrouterApiKey ? 1 : 0,
+    openrouterApiKey,
+    openrouterApiKey,
   ).run()
 
   return json(await getStatePayload(env))
