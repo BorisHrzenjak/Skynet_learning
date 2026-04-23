@@ -16,6 +16,7 @@ import { oneDark } from '@codemirror/theme-one-dark'
 import './App.css'
 import {
   confirmVerifiedExercise,
+  fetchExerciseById,
   fetchAppState,
   fetchNextExercise,
   getApiConfig,
@@ -226,6 +227,16 @@ function formatDuration(totalSeconds: number) {
   return `${minutes}m`
 }
 
+function formatDateLabel(timestamp: number | null) {
+  if (!timestamp) {
+    return 'No date'
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+  }).format(timestamp)
+}
+
 function App() {
   const hasApiConfig = getApiConfig() !== null
   const [code, setCode] = useState(STARTER_CODE)
@@ -271,6 +282,7 @@ function App() {
   const [settingsSaveState, setSettingsSaveState] = useState<SettingsSaveState>('idle')
   const [settingsError, setSettingsError] = useState('')
   const [appView, setAppView] = useState<AppView>('workspace')
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null)
   const [lastInteractionAt, setLastInteractionAt] = useState<number | null>(null)
   const [hintVisible, setHintVisible] = useState(false)
   const [hintHandled, setHintHandled] = useState(false)
@@ -529,6 +541,28 @@ function App() {
       )
     }
   }, [hasApiConfig, resetExerciseUi, resolveNextExercise])
+
+  const handleOpenExerciseFromStats = useCallback(
+    async (exerciseId: string) => {
+      setExerciseState('loading')
+      setExerciseLoadingMessage('Loading selected exercise...')
+      setExerciseError('')
+
+      try {
+        const response = await fetchExerciseById(exerciseId)
+        resetExerciseUi(response.exercise)
+        setExerciseState('ready')
+        setExerciseLoadingMessage('')
+        setAppView('workspace')
+      } catch (error) {
+        setExerciseState('error')
+        setExerciseError(
+          error instanceof Error ? error.message : 'Failed to load the selected exercise.',
+        )
+      }
+    },
+    [resetExerciseUi],
+  )
 
   const getCurrentLineContext = useCallback(() => {
     const view = editorViewRef.current
@@ -1072,14 +1106,34 @@ function App() {
   )
   const resetCode = currentExercise?.starterCode ?? STARTER_CODE
   const failedTests = lastRun?.tests.filter((test) => test.status === 'failed') ?? []
-  const sortedTopics = [...(appState?.competenceMap ?? [])].sort((left, right) => {
-    if (left.difficultyBand !== right.difficultyBand) {
-      const order = { basic: 0, intermediate: 1, advanced: 2 }
-      return order[left.difficultyBand] - order[right.difficultyBand]
+  const sortedTopics = useMemo(
+    () =>
+      [...(appState?.competenceMap ?? [])].sort((left, right) => {
+        if (left.difficultyBand !== right.difficultyBand) {
+          const order = { basic: 0, intermediate: 1, advanced: 2 }
+          return order[left.difficultyBand] - order[right.difficultyBand]
+        }
+
+        return left.score - right.score
+      }),
+    [appState?.competenceMap],
+  )
+
+  useEffect(() => {
+    if (!sortedTopics.length) {
+      setSelectedTopicId(null)
+      return
     }
 
-    return left.score - right.score
-  })
+    setSelectedTopicId((current) =>
+      current && sortedTopics.some((topic) => topic.topicId === current)
+        ? current
+        : sortedTopics[0].topicId,
+    )
+  }, [sortedTopics])
+
+  const selectedTopic =
+    sortedTopics.find((topic) => topic.topicId === selectedTopicId) ?? sortedTopics[0] ?? null
 
   return (
     <div className="app-shell">
@@ -1138,8 +1192,10 @@ function App() {
               <strong>{appState.currentDifficultyBand}</strong>
             </div>
             <div className="panel-card stats-card">
-              <span>Total attempts</span>
-              <strong>{appState.summary.totalAttempts}</strong>
+              <span>Exercises solved</span>
+              <strong>
+                {appState.summary.solvedExercises} / {appState.summary.triedExercises}
+              </strong>
             </div>
             <div className="panel-card stats-card">
               <span>Total time spent</span>
@@ -1156,24 +1212,92 @@ function App() {
               <h3>Topic competence</h3>
               <div className="topic-grid">
                 {sortedTopics.map((topic) => (
-                  <div key={topic.topicId} className="topic-card">
+                  <button
+                    key={topic.topicId}
+                    type="button"
+                    className={`topic-card ${selectedTopic?.topicId === topic.topicId ? 'topic-card--selected' : ''}`}
+                    onClick={() => setSelectedTopicId(topic.topicId)}
+                  >
                     <div className="topic-card__header">
                       <span>{topic.displayName}</span>
                       <span className={`difficulty-chip difficulty-chip--${topic.difficultyBand}`}>{topic.difficultyBand}</span>
                     </div>
                     <div className="topic-card__score-row">
                       <strong>{topic.score.toFixed(2)}</strong>
-                      <span>{topic.attemptCount} attempts</span>
+                      <span>
+                        {topic.solvedExerciseCount} / {topic.triedExerciseCount} solved
+                      </span>
                     </div>
                     <div className="topic-card__bar">
                       <div className="topic-card__bar-fill" style={{ width: `${Math.max(6, topic.score * 100)}%` }} />
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
 
             <div className="stats-side-column">
+              <div className="panel-card">
+                {selectedTopic ? (
+                  <>
+                    <div className="topic-detail__header">
+                      <div>
+                        <p className="eyebrow">Selected topic</p>
+                        <h3>{selectedTopic.displayName}</h3>
+                      </div>
+                      <span className={`difficulty-chip difficulty-chip--${selectedTopic.difficultyBand}`}>
+                        {selectedTopic.difficultyBand}
+                      </span>
+                    </div>
+
+                    <dl className="topic-detail__stats">
+                      <div>
+                        <dt>Solved</dt>
+                        <dd>
+                          {selectedTopic.solvedExerciseCount} / {selectedTopic.triedExerciseCount}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Attempts</dt>
+                        <dd>{selectedTopic.attemptCount}</dd>
+                      </div>
+                      <div>
+                        <dt>Competence</dt>
+                        <dd>{selectedTopic.score.toFixed(2)}</dd>
+                      </div>
+                    </dl>
+
+                    <div className="topic-detail__list">
+                      {selectedTopic.solvedExercises.length ? (
+                        selectedTopic.solvedExercises.map((exercise) => (
+                          <div key={`${selectedTopic.topicId}-${exercise.exerciseId}`} className="topic-exercise-item">
+                            <div className="topic-exercise-item__copy">
+                              <strong>{exercise.label}</strong>
+                              <span>
+                                Solved {formatDateLabel(exercise.lastSolvedAt)} · {exercise.attemptCount}{' '}
+                                {pluralize(exercise.attemptCount, 'attempt', 'attempts')}
+                              </span>
+                            </div>
+                            <button
+                              className="ghost-button"
+                              onClick={() => void handleOpenExerciseFromStats(exercise.exerciseId)}
+                            >
+                              Revisit
+                            </button>
+                          </div>
+                        ))
+                      ) : selectedTopic.triedExerciseCount > 0 ? (
+                        <p className="status-copy">No solved exercises in this topic yet.</p>
+                      ) : (
+                        <p className="status-copy">You have not tried an exercise in this topic yet.</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <p className="status-copy">No topics available yet.</p>
+                )}
+              </div>
+
               <div className="panel-card">
                 <h3>Recent attempts</h3>
                 <div className="history-list">

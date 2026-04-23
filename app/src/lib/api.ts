@@ -67,6 +67,18 @@ export type CompetenceTopic = {
   score: number
   attemptCount: number
   lastUpdated: number | null
+  solvedExerciseCount: number
+  triedExerciseCount: number
+  solvedExercises: TopicExercise[]
+}
+
+export type TopicExercise = {
+  exerciseId: string
+  label: string
+  difficultyBand: DifficultyBand
+  attemptCount: number
+  lastAttemptedAt: number | null
+  lastSolvedAt: number | null
 }
 
 export type AppSettings = {
@@ -108,6 +120,8 @@ export type AppState = {
   summary: {
     totalAttempts: number
     totalTimeSpentSeconds: number
+    triedExercises: number
+    solvedExercises: number
   }
   currentDifficultyBand: DifficultyBand
 }
@@ -177,6 +191,14 @@ export async function fetchNextExercise() {
   return apiFetch<NextExerciseResponse>('/api/exercise/next', {
     method: 'POST',
     body: JSON.stringify({}),
+  })
+}
+
+export async function fetchExerciseById(exerciseId: string) {
+  const params = new URLSearchParams({ id: exerciseId })
+
+  return apiFetch<{ exercise: Exercise }>(`/api/exercise?${params.toString()}`, {
+    method: 'GET',
   })
 }
 

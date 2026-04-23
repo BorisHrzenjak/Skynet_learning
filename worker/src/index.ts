@@ -34,6 +34,17 @@ type TopicRow = {
   last_updated: number | null
 }
 
+type TopicExerciseProgressRow = {
+  topic_id: string
+  exercise_id: string
+  prompt_md: string
+  difficulty_band: DifficultyBand
+  attempt_count: number | null
+  solved: number | null
+  last_attempted_at: number | null
+  last_solved_at: number | null
+}
+
 type AttemptRow = {
   id: string
   exercise_id: string
@@ -46,6 +57,11 @@ type AttemptRow = {
 type AttemptSummaryRow = {
   total_attempts: number | null
   total_time_spent_seconds: number | null
+}
+
+type ExerciseProgressSummaryRow = {
+  tried_exercise_count: number | null
+  solved_exercise_count: number | null
 }
 
 type SettingsRow = {
@@ -350,6 +366,11 @@ function summarizePrompt(promptMd: string) {
     .slice(0, 180)
 }
 
+function getPromptLabel(promptMd: string) {
+  const headingMatch = promptMd.match(/^#\s+(.+)$/m)
+  return headingMatch?.[1]?.trim() || summarizePrompt(promptMd)
+}
+
 function validateGeneratedExercisePayload(payload: {
   prompt_md: string
   starter_code: string
@@ -588,6 +609,34 @@ async function getStatePayload(env: Env) {
     `,
   ).first<AttemptSummaryRow>()
 
+  const exerciseProgressSummary = await env.DB.prepare(
+    `
+      SELECT
+        COUNT(DISTINCT exercise_id) AS tried_exercise_count,
+        COUNT(DISTINCT CASE WHEN passed = 1 THEN exercise_id END) AS solved_exercise_count
+      FROM attempts
+    `,
+  ).first<ExerciseProgressSummaryRow>()
+
+  const topicExerciseResults = await env.DB.prepare(
+    `
+      SELECT
+        exercise_topics.topic_id,
+        exercises.id AS exercise_id,
+        exercises.prompt_md,
+        exercises.difficulty_band,
+        COUNT(attempts.id) AS attempt_count,
+        MAX(CASE WHEN attempts.passed = 1 THEN 1 ELSE 0 END) AS solved,
+        MAX(attempts.created_at) AS last_attempted_at,
+        MAX(CASE WHEN attempts.passed = 1 THEN attempts.created_at ELSE NULL END) AS last_solved_at
+      FROM exercise_topics
+      INNER JOIN exercises ON exercises.id = exercise_topics.exercise_id
+      INNER JOIN attempts ON attempts.exercise_id = exercises.id
+      GROUP BY exercise_topics.topic_id, exercises.id
+      ORDER BY exercise_topics.topic_id, last_solved_at DESC, last_attempted_at DESC
+    `,
+  ).all<TopicExerciseProgressRow>()
+
   const competenceMap = (topicResults.results ?? []).map((row) => ({
     topicId: row.topic_id,
     displayName: row.display_name,
@@ -595,7 +644,43 @@ async function getStatePayload(env: Env) {
     score: row.score ?? 0,
     attemptCount: row.attempt_count ?? 0,
     lastUpdated: row.last_updated,
+    solvedExerciseCount: 0,
+    triedExerciseCount: 0,
+    solvedExercises: [] as Array<{
+      exerciseId: string
+      label: string
+      difficultyBand: DifficultyBand
+      attemptCount: number
+      lastAttemptedAt: number | null
+      lastSolvedAt: number | null
+    }>,
   }))
+
+  const competenceMapByTopicId = new Map(
+    competenceMap.map((topic) => [topic.topicId, topic] as const),
+  )
+
+  for (const row of topicExerciseResults.results ?? []) {
+    const topic = competenceMapByTopicId.get(row.topic_id)
+
+    if (!topic) {
+      continue
+    }
+
+    topic.triedExerciseCount += 1
+
+    if (row.solved === 1) {
+      topic.solvedExerciseCount += 1
+      topic.solvedExercises.push({
+        exerciseId: row.exercise_id,
+        label: getPromptLabel(row.prompt_md),
+        difficultyBand: row.difficulty_band,
+        attemptCount: row.attempt_count ?? 0,
+        lastAttemptedAt: row.last_attempted_at,
+        lastSolvedAt: row.last_solved_at,
+      })
+    }
+  }
 
   return {
     competenceMap,
@@ -621,6 +706,8 @@ async function getStatePayload(env: Env) {
     summary: {
       totalAttempts: attemptSummary?.total_attempts ?? 0,
       totalTimeSpentSeconds: attemptSummary?.total_time_spent_seconds ?? 0,
+      triedExercises: exerciseProgressSummary?.tried_exercise_count ?? 0,
+      solvedExercises: exerciseProgressSummary?.solved_exercise_count ?? 0,
     },
     currentDifficultyBand: getCurrentDifficultyBand(
       topicResults.results ?? [],
@@ -631,6 +718,24 @@ async function getStatePayload(env: Env) {
 
 async function handleState(env: Env) {
   return json(await getStatePayload(env))
+}
+
+async function handleGetExercise(url: URL, env: Env) {
+  await ensureHardcodedExercises(env)
+
+  const exerciseId = url.searchParams.get('id')?.trim()
+
+  if (!exerciseId) {
+    return json({ error: 'Exercise id is required.' }, 400)
+  }
+
+  const exercise = await getExerciseRecord(env, exerciseId)
+
+  if (!exercise) {
+    return json({ error: 'Unknown exercise id.' }, 404)
+  }
+
+  return json({ exercise: toPublicExercise(exercise) })
 }
 
 async function runModelCall(options: {
@@ -1648,6 +1753,10 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/api/state') {
       return handleState(env)
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/exercise') {
+      return handleGetExercise(url, env)
     }
 
     if (request.method === 'POST' && url.pathname === '/api/exercise/next') {

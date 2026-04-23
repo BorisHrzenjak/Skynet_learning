@@ -304,10 +304,28 @@
 }
 
 .topic-card {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(10, 14, 21, 0.7);
   padding: 0.75rem;
+  transition: border-color 200ms ease, background 200ms ease, transform 200ms ease;
+}
+
+.topic-card:hover {
+  border-color: rgba(74, 144, 184, 0.3);
+  background: rgba(13, 18, 27, 0.88);
+}
+
+.topic-card--selected {
+  border-color: rgba(74, 144, 184, 0.5);
+  background: rgba(12, 21, 32, 0.92);
+  box-shadow: 0 0 0 1px rgba(74, 144, 184, 0.12);
 }
 
 .topic-card__header,
@@ -341,6 +359,83 @@
   height: 100%;
   border-radius: 999px;
   background: linear-gradient(90deg, rgba(74, 144, 184, 0.6), rgba(110, 231, 255, 0.8));
+}
+
+.topic-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.topic-detail__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0.85rem 0 0;
+}
+
+.topic-detail__stats > div,
+.history-item,
+.topic-exercise-item {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.topic-detail__stats > div {
+  padding: 0.5rem 0.6rem;
+}
+
+.topic-detail__stats dt {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+}
+
+.topic-detail__stats dd {
+  margin: 0.18rem 0 0;
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.topic-detail__list,
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.topic-exercise-item,
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+}
+
+.topic-exercise-item__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.topic-exercise-item__copy strong,
+.history-item span:first-child {
+  color: var(--text-primary);
+  font-size: 0.84rem;
+}
+
+.topic-exercise-item__copy span,
+.history-item span:last-child {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
 }
 
 /* ── Main Panels ────────────────────────────────────────── */
@@ -1126,7 +1221,8 @@ h3 {
 
   .stats-summary-grid,
   .stats-layout,
-  .topic-grid {
+  .topic-grid,
+  .topic-detail__stats {
     grid-template-columns: 1fr;
   }
 
