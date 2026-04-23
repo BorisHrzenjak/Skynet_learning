@@ -268,8 +268,9 @@ function buildStarterCode(code, testedNames) {
 }
 
 function buildPromptMarkdown(taskId, prompt, functionName) {
+  const title = buildPromptTitle(taskId, prompt, functionName)
   const lines = [
-    `# MBPP ${taskId}`,
+    `# ${title}`,
     '',
     prompt,
   ]
@@ -279,6 +280,51 @@ function buildPromptMarkdown(taskId, prompt, functionName) {
   }
 
   return `${lines.join('\n').trim()}\n`
+}
+
+function buildPromptTitle(taskId, prompt, functionName) {
+  const normalized = prompt.replace(/\s+/g, ' ').trim()
+  const patterns = [
+    /^write\s+a\s+python\s+function\s+to\s+/i,
+    /^write\s+a\s+function\s+to\s+/i,
+    /^write\s+a\s+function\s+that\s+/i,
+    /^write\s+a\s+python\s+function\s+that\s+/i,
+  ]
+
+  let label = normalized
+
+  for (const pattern of patterns) {
+    if (pattern.test(label)) {
+      label = label.replace(pattern, '')
+      break
+    }
+  }
+
+  label = label
+    .replace(/^returns?\s+/i, '')
+    .replace(/[.?!]+$/, '')
+    .trim()
+
+  if (!label) {
+    label = functionName ? `Practice ${functionName}` : `MBPP ${taskId}`
+  }
+
+  const shortLabel = label.split(/[,;:]/)[0]?.trim() ?? label
+  return toTitleCase(shortLabel)
+}
+
+function toTitleCase(value) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      if (word === word.toUpperCase()) {
+        return word
+      }
+
+      return word[0]?.toUpperCase() + word.slice(1)
+    })
+    .join(' ')
 }
 
 function buildTests(testImports, testList, testedNames) {

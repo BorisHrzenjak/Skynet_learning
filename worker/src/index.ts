@@ -1024,6 +1024,14 @@ async function handleNextExercise(request: Request, env: Env) {
     return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
   }
 
+  if (importedFallback) {
+    return json({ mode: 'ready', exercise: toPublicExercise(importedFallback) })
+  }
+
+  if (cachedExercise) {
+    return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
+  }
+
   if (env.OPENROUTER_API_KEY) {
     try {
       const candidate = await generateExerciseCandidate(env, settings, topic, difficultyBand)
@@ -1033,18 +1041,8 @@ async function handleNextExercise(request: Request, env: Env) {
         return json({ mode: 'verify', candidate })
       }
     } catch {
-      if (cachedExercise) {
-        return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
-      }
+      // Fall through to hardcoded fallback below.
     }
-  }
-
-  if (cachedExercise) {
-    return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
-  }
-
-  if (importedFallback) {
-    return json({ mode: 'ready', exercise: toPublicExercise(importedFallback) })
   }
 
   if (hardcodedFallback) {
@@ -1224,20 +1222,48 @@ function buildFallbackHelperMessage(options: {
     .replace(/\s+/g, ' ')
     .trim()
 
+  const titleMatch = options.promptMd.match(/^#\s+(.+)$/m)
+  const functionMatch = options.promptMd.match(/Implement\s+`([^`]+)`/i)
+  const firstSentence = plainPrompt.match(/(.+?[.?!])(?:\s|$)/)?.[1]?.trim() ?? plainPrompt
+  const simplifiedTask = firstSentence
+    .replace(/^write\s+a\s+python\s+function\s+to\s+/i, '')
+    .replace(/^write\s+a\s+function\s+to\s+/i, '')
+    .replace(/^write\s+a\s+function\s+that\s+/i, '')
+    .replace(/^write\s+a\s+python\s+function\s+that\s+/i, '')
+    .replace(/^this task is to\s+/i, '')
+    .replace(/[.?!]+$/, '')
+    .trim()
+
   if (
     /(explain this task|i don't understand|plain language|what is this asking|explain the task)/.test(
       normalized,
     )
   ) {
+    const lines = ['Plain-language version:', '']
+
+    if (titleMatch?.[1]?.trim()) {
+      lines.push(`Title: ${titleMatch[1].trim()}`, '')
+    }
+
+    if (functionMatch?.[1]?.trim()) {
+      lines.push(`You need to write a function named \`${functionMatch[1].trim()}\`.`, '')
+    }
+
+    if (simplifiedTask) {
+      const sentence = simplifiedTask[0]?.toUpperCase() + simplifiedTask.slice(1)
+      lines.push(`Main job: ${sentence}.`, '')
+    }
+
+    lines.push('Focus on three things:', '- what goes in', '- what should come back out')
+
+    if (/rule|remove|keep|same|order|edge case|empty|present|without/i.test(plainPrompt)) {
+      lines.push('- any special rule in the prompt')
+    } else {
+      lines.push('- any small condition the prompt cares about')
+    }
+
     return [
-      'Plain-language version:',
-      '',
-      plainPrompt,
-      '',
-      'Focus on three things:',
-      '- what goes into the function',
-      '- what should come back out',
-      '- any special rules or edge cases in the prompt',
+      ...lines,
     ].join('\n')
   }
 

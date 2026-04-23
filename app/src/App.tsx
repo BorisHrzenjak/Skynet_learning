@@ -24,7 +24,7 @@ import {
   sendChatMessage,
   submitExercise,
   type AppState,
-  type ChatEntry,
+  type ChatEntry as ApiChatEntry,
   type Exercise,
   type NextExerciseResponse,
 } from './lib/api'
@@ -73,6 +73,10 @@ type SettingsDraft = {
   }
 }
 
+type ChatMessageEntry = ApiChatEntry & {
+  hidden?: boolean
+}
+
 function getCompletionStart(code: string, position: number) {
   let start = position
 
@@ -115,22 +119,59 @@ function isEditableTarget(target: EventTarget | null) {
 }
 
 function buildRunErrorMessage(run: PythonRunResult) {
+  const summarizeTraceback = (value: string) => {
+    const lines = value
+      .trim()
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+
+    if (!lines.length) {
+      return ''
+    }
+
+    const importantLines = lines.filter(
+      (line) =>
+        /^traceback/i.test(line) ||
+        /^file\s+/i.test(line) ||
+        /error$/i.test(line) ||
+        /exception$/i.test(line) ||
+        /assertionerror/i.test(line),
+    )
+
+    return (importantLines.length ? importantLines : lines.slice(-3)).slice(0, 4).join('\n')
+  }
+
   const failedTests = run.tests.filter((test) => test.status === 'failed')
 
   if (run.stderr.trim()) {
-    return `I just ran the code and got this error:\n\n${run.stderr.trim()}\n\nCan you explain what's going wrong?`
+    return [
+      'My code failed when I ran it.',
+      '',
+      'Short error summary:',
+      summarizeTraceback(run.stderr),
+      '',
+      'Please explain what this means in simple beginner-friendly language and tell me what to check next.',
+    ].join('\n')
   }
 
   if (failedTests.length > 0) {
     const summary = failedTests
       .slice(0, 2)
-      .map((test) => `${test.name}: ${test.message}`)
+      .map((test) => `${test.name}: ${summarizeTraceback(test.message)}`)
       .join('\n\n')
 
-    return `I just ran the code and some tests failed:\n\n${summary}\n\nCan you explain what's going wrong?`
+    return [
+      'My code ran, but some tests failed.',
+      '',
+      'Short failure summary:',
+      summary,
+      '',
+      'Please explain the likely mistake in simple beginner-friendly language and tell me what to check next.',
+    ].join('\n')
   }
 
-  return 'I just ran the code and it failed. Can you explain what to check next?'
+  return 'My code failed. Please explain the likely problem in simple beginner-friendly language and tell me what to check next.'
 }
 
 function stripTrailingNewline(value: string) {
@@ -211,7 +252,7 @@ function App() {
   const [exerciseStartedAt, setExerciseStartedAt] = useState<number | null>(null)
   const [submissionState, setSubmissionState] = useState<SubmissionState>('idle')
   const [submissionError, setSubmissionError] = useState('')
-  const [chatMessages, setChatMessages] = useState<ChatEntry[]>([])
+  const [chatMessages, setChatMessages] = useState<ChatMessageEntry[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatState, setChatState] = useState<ChatState>('idle')
   const [chatError, setChatError] = useState('')
@@ -241,6 +282,8 @@ function App() {
   const [chatCollapsed, setChatCollapsed] = useState(false)
   const [outputCollapsed, setOutputCollapsed] = useState(false)
   const [recallAnchor, setRecallAnchor] = useState<{ top: number; left: number } | null>(null)
+  const [leftWidth, setLeftWidth] = useState(420)
+  const [rightWidth, setRightWidth] = useState(420)
 
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null)
   const recallInputRef = useRef<HTMLInputElement | null>(null)
@@ -495,7 +538,7 @@ function App() {
   }, [])
 
   const sendHelperRequest = useCallback(
-    async (message: string) => {
+    async (message: string, options?: { hideUserMessage?: boolean }) => {
       if (!currentExercise || chatState === 'sending') {
         return
       }
@@ -505,7 +548,10 @@ function App() {
         return
       }
 
-      const history = chatMessages
+      const history: ApiChatEntry[] = chatMessages.map((entry) => ({
+        role: entry.role,
+        content: entry.content,
+      }))
       setChatState('sending')
       setChatError('')
       noteExerciseActivity()
@@ -520,7 +566,7 @@ function App() {
 
         setChatMessages((prev) => [
           ...prev,
-          { role: 'user', content: trimmedMessage },
+          { role: 'user', content: trimmedMessage, hidden: options?.hideUserMessage },
           { role: 'assistant', content: response.message },
         ])
         setChatUsedCount((count) => count + 1)
@@ -728,7 +774,8 @@ function App() {
     }
 
     await sendHelperRequest(
-      "Explain this task in plain language like to a teenager who's learning to code. Do not solve it. Focus on what goes in, what should come out, and any tricky rules.",
+      'Explain this task in very simple beginner-friendly language. Do not solve it. Keep it short. Focus on inputs, outputs, and tricky rules or edge cases.',
+      { hideUserMessage: true },
     )
   }, [currentExercise, sendHelperRequest])
 
@@ -963,6 +1010,57 @@ function App() {
     void sendHelperRequest(buildRunErrorMessage(lastRun))
   }, [autoExplainRunErrors, chatState, currentExercise, lastRun, sendHelperRequest])
 
+  const startGutterDrag = (side: 'left' | 'right') => (event: React.MouseEvent) => {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = side === 'left' ? leftWidth : rightWidth
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientX - startX
+      const signed = side === 'left' ? startWidth + delta : startWidth - delta
+      const clamped = Math.min(640, Math.max(220, signed))
+      if (side === 'left') {
+        setLeftWidth(clamped)
+      } else {
+        setRightWidth(clamped)
+      }
+    }
+
+    const handleUp = () => {
+      window.removeEventListener('mousemove', handleMove)
+      window.removeEventListener('mouseup', handleUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('mousemove', handleMove)
+    window.addEventListener('mouseup', handleUp)
+  }
+
+  const foldIcon = (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M16 12h6" />
+      <path d="M8 12H2" />
+      <path d="M12 2v2" />
+      <path d="M12 8v2" />
+      <path d="M12 14v2" />
+      <path d="M12 20v2" />
+      <path d="m19 15 3-3-3-3" />
+      <path d="m5 9-3 3 3 3" />
+    </svg>
+  )
+
   const canSubmit = Boolean(
     currentExercise && lastRun?.passed && !isRunning && submissionState !== 'success',
   )
@@ -1106,15 +1204,12 @@ function App() {
         <main
         className="workspace"
         style={{
-          gridTemplateColumns: `${promptCollapsed ? '3.8rem' : 'minmax(18rem, 24%)'} minmax(34rem, 1fr) ${chatCollapsed ? '3.8rem' : 'minmax(15rem, 22%)'}`,
+          gridTemplateColumns: `${promptCollapsed ? '3.8rem' : `${leftWidth}px`} 14px minmax(0, 1fr) 14px ${chatCollapsed ? '3.8rem' : `${rightWidth}px`}`,
         }}
         >
         <aside className={`side-panel ${promptCollapsed ? 'side-panel--collapsed' : ''}`}>
           <div className="side-panel__header">
-            <h2>Prompt</h2>
-            <button className="ghost-button" onClick={() => setPromptCollapsed((value) => !value)}>
-              {promptCollapsed ? 'Open' : 'Collapse'}
-            </button>
+            <h2>Exercise</h2>
           </div>
           {!promptCollapsed ? (
             <>
@@ -1213,9 +1308,27 @@ function App() {
               </div>
             </>
           ) : (
-            <div className="side-panel__collapsed-label">Prompt</div>
+            <div className="side-panel__collapsed-label">Exercise</div>
           )}
         </aside>
+
+        <div
+          className={`workspace-gutter ${promptCollapsed ? 'workspace-gutter--disabled' : ''}`}
+          onMouseDown={!promptCollapsed ? startGutterDrag('left') : undefined}
+          role="separator"
+          aria-orientation="vertical"
+        >
+          <button
+            type="button"
+            className="workspace-gutter__toggle"
+            onClick={() => setPromptCollapsed((value) => !value)}
+            onMouseDown={(event) => event.stopPropagation()}
+            aria-label={promptCollapsed ? 'Expand Exercise panel' : 'Collapse Exercise panel'}
+            title={promptCollapsed ? 'Expand' : 'Collapse'}
+          >
+            {foldIcon}
+          </button>
+        </div>
 
         <section className="editor-panel">
           <div className="editor-toolbar">
@@ -1401,6 +1514,24 @@ function App() {
           </section>
         </section>
 
+        <div
+          className={`workspace-gutter ${chatCollapsed ? 'workspace-gutter--disabled' : ''}`}
+          onMouseDown={!chatCollapsed ? startGutterDrag('right') : undefined}
+          role="separator"
+          aria-orientation="vertical"
+        >
+          <button
+            type="button"
+            className="workspace-gutter__toggle"
+            onClick={() => setChatCollapsed((value) => !value)}
+            onMouseDown={(event) => event.stopPropagation()}
+            aria-label={chatCollapsed ? 'Expand Chat panel' : 'Collapse Chat panel'}
+            title={chatCollapsed ? 'Expand' : 'Collapse'}
+          >
+            {foldIcon}
+          </button>
+        </div>
+
         <aside className={`side-panel side-panel--chat ${chatCollapsed ? 'side-panel--collapsed' : ''}`}>
           <div className="side-panel__header">
             <div className="chat-header">
@@ -1417,9 +1548,6 @@ function App() {
                 </span>
               </div>
             </div>
-            <button className="ghost-button" onClick={() => setChatCollapsed((value) => !value)}>
-              {chatCollapsed ? 'Open' : 'Collapse'}
-            </button>
           </div>
 
           {!chatCollapsed ? (
@@ -1448,7 +1576,7 @@ function App() {
                     </p>
                   </div>
                 ) : (
-                  chatMessages.map((entry, index) => (
+                  chatMessages.filter((entry) => !entry.hidden).map((entry, index) => (
                     <div key={`${entry.role}-${index}`} className={`chat-message chat-message--${entry.role}`}>
                       <div className="chat-message__role">{entry.role === 'user' ? 'You' : 'AI'}</div>
                       <div className="chat-message__content markdown-content">
