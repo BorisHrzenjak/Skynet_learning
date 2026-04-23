@@ -715,10 +715,38 @@ async function getCachedExercise(
           WHERE attempts.exercise_id = exercises.id
             AND attempts.created_at >= ?
         )
-      ORDER BY RANDOM()
+      ORDER BY
+        CASE
+          WHEN exercises.hash LIKE 'mbpp:%' THEN 0
+          WHEN exercises.hash LIKE 'hardcoded:%' THEN 2
+          ELSE 1
+        END,
+        RANDOM()
       LIMIT 1
     `,
   ).bind(topicId, difficultyBand, cutoff).first<{ id: string }>()
+
+  if (!row) {
+    return null
+  }
+
+  return getExerciseRecord(env, row.id)
+}
+
+async function getImportedFallbackExercise(env: Env) {
+  const row = await env.DB.prepare(
+    `
+      SELECT exercises.id
+      FROM exercises
+      WHERE exercises.hash LIKE 'mbpp:%'
+      ORDER BY (
+        SELECT COUNT(*)
+        FROM attempts
+        WHERE attempts.exercise_id = exercises.id
+      ) ASC, RANDOM()
+      LIMIT 1
+    `,
+  ).first<{ id: string }>()
 
   if (!row) {
     return null
@@ -937,9 +965,14 @@ async function handleNextExercise(request: Request, env: Env) {
   const state = await getStatePayload(env)
   const difficultyBand = pickWeightedBand(state.currentDifficultyBand)
   const topic = await chooseTargetTopic(env, settings, difficultyBand)
+  const importedFallback = await getImportedFallbackExercise(env)
   const hardcodedFallback = await getHardcodedFallbackExercise(env)
 
   if (!topic) {
+    if (importedFallback) {
+      return json({ mode: 'ready', exercise: toPublicExercise(importedFallback) })
+    }
+
     if (hardcodedFallback) {
       return json({ mode: 'ready', exercise: toPublicExercise(hardcodedFallback) })
     }
@@ -971,6 +1004,10 @@ async function handleNextExercise(request: Request, env: Env) {
 
   if (cachedExercise) {
     return json({ mode: 'ready', exercise: toPublicExercise(cachedExercise) })
+  }
+
+  if (importedFallback) {
+    return json({ mode: 'ready', exercise: toPublicExercise(importedFallback) })
   }
 
   if (hardcodedFallback) {

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import:mbpp": "node ./scripts/import-mbpp.mjs",
+    "seed:mbpp": "wrangler d1 execute DB --local --file ./generated/mbpp.seed.sql",
+    "seed:mbpp:status": "node ./scripts/query-local-d1.mjs \"SELECT COUNT(*) AS mbpp_exercises FROM exercises WHERE id LIKE 'mbpp-%';\""
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260414.0",
